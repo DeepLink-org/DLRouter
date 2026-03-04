@@ -1,0 +1,44 @@
+# Pre-commit hooks for DLRouter
+# Install: pre-commit install
+# Run all: pre-commit run --all-files
+# Update:  pre-commit autoupdate
+
+default_language_version:
+  python: python3
+
+repos:
+  # ---------- Ruff: lint + format ----------
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.8.6
+    hooks:
+      # Linter
+      - id: ruff
+        args: [--fix, --exit-non-zero-on-fix]
+        types_or: [python, pyi]
+      # Formatter (replaces black / yapf)
+      - id: ruff-format
+        types_or: [python, pyi]
+
+  # ---------- General file hygiene ----------
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: trailing-whitespace
+        args: [--markdown-linebreak-ext=md]
+      - id: end-of-file-fixer
+      - id: check-yaml
+      - id: check-toml
+      - id: check-added-large-files
+        args: [--maxkb=500]
+      - id: check-merge-conflict
+      - id: debug-statements
+      - id: check-ast
+
+  # ---------- Type checking (optional) ----------
+  - repo: https://github.com/pre-commit/mirrors-mypy
+    rev: v1.14.1
+    hooks:
+      - id: mypy
+        additional_dependencies: [pydantic>=2.0, fastapi>=0.100]
+        args: [--ignore-missing-imports]
+        pass_filenames: false
