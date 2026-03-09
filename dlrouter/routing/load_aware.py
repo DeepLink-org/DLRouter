@@ -74,10 +74,17 @@ class MinObservedLatencyStrategy(BaseRoutingStrategy):
     randomly select among them to achieve load balancing.
 
     Cold start handling:
-    - If all nodes have no data: select by minimum unfinished count
-    - If some nodes have no data: prioritize nodes without data to warm them up
-    - If all nodes have data: select among nodes with similar latency
+    - Nodes with no latency data are assigned a default latency of 1.0
+    - This allows unified latency-based scheduling without special cases
     """
+
+    DEFAULT_LATENCY = 1.0  # Default latency for cold start nodes
+
+    def _get_avg_latency(self, st: NodeStatus) -> float:
+        """Get average latency from node status, default if no data."""
+        if not st.latency:
+            return self.DEFAULT_LATENCY
+        return float(np.mean(np.array(list(st.latency))))
 
     def select_node(
         self,
@@ -90,84 +97,21 @@ class MinObservedLatencyStrategy(BaseRoutingStrategy):
         if not matched:
             return None
 
-        urls = []
-        latencies = []
-        for url, st in matched.items():
-            urls.append(url)
-            if len(st.latency):
-                latencies.append(np.mean(np.array(list(st.latency))))
-            else:
-                latencies.append(float('inf'))
+        # Build latency map (use default for cold start)
+        lat_map = {url: self._get_avg_latency(st) for url, st in matched.items()}
+        min_lat = min(lat_map.values())
 
-        # Find minimum latency (excluding inf)
-        valid_latencies = [lat for lat in latencies if lat != float('inf')]
-        min_lat = min(valid_latencies) if valid_latencies else float('inf')
-
-        # Cold start handling:
-        # If all nodes have no latency data, use unfinished count to balance load
-        if min_lat == float('inf'):
-            # Find minimum unfinished count
-            min_unfinished = min(matched[u].unfinished for u in matched)
-            # Get all nodes with the same minimum unfinished count
-            candidates = [u for u in matched if matched[u].unfinished == min_unfinished]
-            # Randomly select one to prevent load concentration in high concurrency
-            selected_url = _random.choice(candidates)
-            logger.debug(
-                f'MinObservedLatency (cold start): '
-                f'selected={selected_url} (unfinished={matched[selected_url].unfinished}, '
-                f'candidates={len(candidates)}/{len(matched)})'
-            )
-            return selected_url
-
-        # Partial cold start handling:
-        # Some nodes have latency data, some don't
-        # Prioritize nodes without data, but prevent overload by considering load balance
-        has_no_data = [urls[i] for i, lat in enumerate(latencies) if lat == float('inf')]
-        has_data = [urls[i] for i, lat in enumerate(latencies) if lat != float('inf')]
-
-        if has_no_data:
-            # Check if no-data nodes are overloaded compared to nodes with data
-            min_unfinished_no_data = min(matched[u].unfinished for u in has_no_data)
-            min_unfinished_with_data = min(matched[u].unfinished for u in has_data) if has_data else float('inf')
-
-            # Threshold: if no-data nodes have 2+ more unfinished requests than data nodes,
-            # include all nodes to share the load
-            if has_data and min_unfinished_no_data >= min_unfinished_with_data + 2:
-                # Load balance: include both no-data and with-data nodes with similar load
-                all_candidates = has_no_data + has_data
-                selected_url = _random.choice(all_candidates)
-                logger.debug(
-                    f'MinObservedLatency (load balance): '
-                    f'selected={selected_url} (no_data_min={min_unfinished_no_data}, '
-                    f'data_min={min_unfinished_with_data}, all_candidates={len(all_candidates)})'
-                )
-                return selected_url
-
-            # Otherwise, prioritize no-data nodes with minimum unfinished
-            candidates = [u for u in has_no_data if matched[u].unfinished == min_unfinished_no_data]
-            selected_url = _random.choice(candidates)
-            logger.debug(
-                f'MinObservedLatency (partial cold start): '
-                f'selected={selected_url} (unfinished={matched[selected_url].unfinished}, '
-                f'candidates={len(candidates)}/{len(has_no_data)} no_data_nodes)'
-            )
-            return selected_url
-
-        # Load balancing enhancement:
         # Find all nodes with latency within 50% of the minimum
-        candidates_with_similar_lat = [
-            urls[i]
-            for i, lat in enumerate(latencies)
-            if lat < min_lat * 1.5  # 50% tolerance
-        ]
+        similar = [url for url, lat in lat_map.items() if lat < min_lat * 1.5]
 
-        # Randomly select one from candidates with similar latency
-        selected_url = _random.choice(candidates_with_similar_lat)
+        # Among similar latency nodes, select the one with minimum unfinished
+        min_unfinished = min(matched[url].unfinished for url in similar)
+        best = [url for url in similar if matched[url].unfinished == min_unfinished]
+        selected = _random.choice(best)
 
         logger.debug(
             f'MinObservedLatency: min_lat={min_lat:.3f}, '
-            f'candidates={len(candidates_with_similar_lat)}/{len(urls)}, '
-            f'selected={selected_url}'
+            f'similar={len(similar)}, best_unfinished={min_unfinished}, '
+            f'candidates={len(best)}, selected={selected}'
         )
-
-        return selected_url
+        return selected
