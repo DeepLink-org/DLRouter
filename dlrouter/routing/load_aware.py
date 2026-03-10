@@ -74,17 +74,10 @@ class MinObservedLatencyStrategy(BaseRoutingStrategy):
     randomly select among them to achieve load balancing.
 
     Cold start handling:
-    - Nodes with no latency data are assigned a default latency of 1.0
-    - This allows unified latency-based scheduling without special cases
+    - If all nodes have no data: use default latency 1.0
+    - If some nodes have data: cold nodes use average latency of warm nodes
+    - This ensures fair comparison between cold and warm nodes
     """
-
-    DEFAULT_LATENCY = 1.0  # Default latency for cold start nodes
-
-    def _get_avg_latency(self, st: NodeStatus) -> float:
-        """Get average latency from node status, default if no data."""
-        if not st.latency:
-            return self.DEFAULT_LATENCY
-        return float(np.mean(np.array(list(st.latency))))
 
     def select_node(
         self,
@@ -97,8 +90,28 @@ class MinObservedLatencyStrategy(BaseRoutingStrategy):
         if not matched:
             return None
 
-        # Build latency map (use default for cold start)
-        lat_map = {url: self._get_avg_latency(st) for url, st in matched.items()}
+        # Calculate average latency for nodes with data
+        latencies_with_data = []
+        for st in matched.values():
+            if st.latency:
+                latencies_with_data.append(float(np.mean(np.array(list(st.latency)))))
+
+        # If no nodes have data, use default latency for all
+        # If some nodes have data, use average of existing data for cold start nodes
+        avg_latency = (
+            sum(latencies_with_data) / len(latencies_with_data)
+            if latencies_with_data
+            else 1.0  # Default when all nodes are cold
+        )
+
+        # Build latency map
+        lat_map = {}
+        for url, st in matched.items():
+            if st.latency:
+                lat_map[url] = float(np.mean(np.array(list(st.latency))))
+            else:
+                lat_map[url] = avg_latency  # Use average of existing data for cold nodes
+
         min_lat = min(lat_map.values())
 
         # Find all nodes with latency within 50% of the minimum
@@ -110,7 +123,7 @@ class MinObservedLatencyStrategy(BaseRoutingStrategy):
         selected = _random.choice(best)
 
         logger.debug(
-            f'MinObservedLatency: min_lat={min_lat:.3f}, '
+            f'MinObservedLatency: min_lat={min_lat:.3f}, avg_for_cold={avg_latency:.3f}, '
             f'similar={len(similar)}, best_unfinished={min_unfinished}, '
             f'candidates={len(best)}, selected={selected}'
         )

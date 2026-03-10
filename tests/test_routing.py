@@ -100,7 +100,7 @@ class TestMinObservedLatency:
     def test_cold_start_all_empty_latency(self):
         """Test when all nodes have empty latency (cold start).
 
-        All nodes should get DEFAULT_LATENCY (1.0), so all are candidates.
+        All nodes should get default latency 1.0, so all are candidates.
         Then select by minimum unfinished.
         """
         mol = create_routing_strategy(RoutingStrategy.MIN_OBSERVED_LATENCY)
@@ -125,8 +125,8 @@ class TestMinObservedLatency:
     def test_mixed_latency_and_empty(self):
         """Test when some nodes have latency data and some don't.
 
-        Empty latency nodes get DEFAULT_LATENCY=1.0.
-        If real latency < 1.5, nodes with data are preferred.
+        Empty latency nodes get avg latency of nodes with data.
+        Both nodes should be in similar latency range and selected by unfinished.
         """
         from collections import deque
 
@@ -141,16 +141,17 @@ class TestMinObservedLatency:
             'http://node2:8000': NodeStatus(
                 models=['model-a'],
                 speed=20.0,
-                unfinished=1,
-                latency=deque(),  # empty, gets default 1.0
+                unfinished=1,  # min unfinished
+                latency=deque(),  # empty, gets avg = 0.133
             ),
         }
-        # node1 has latency 0.133, node2 has default 1.0
+        # node1 has latency 0.133, node2 also gets 0.133 (avg of warm nodes)
         # min_lat = 0.133, threshold = 0.133 * 1.5 = 0.2
-        # Only node1 (0.133 < 0.2) is selected
+        # Both nodes within similar latency range, select by unfinished
+        # node2 has unfinished=1 (min), should always be selected
         for _ in range(10):
             url = mol.select_node('model-a', cands)
-            assert url == 'http://node1:8000'
+            assert url == 'http://node2:8000'
 
     def test_similar_latency_select_by_unfinished(self):
         """Test selecting by unfinished when latencies are similar.
@@ -215,3 +216,32 @@ class TestMinObservedLatency:
             results.add(url)
         # Should hit both nodes
         assert len(results) == 2
+
+    def test_cold_node_with_high_unfinished(self):
+        """Test that cold node with high unfinished is not preferred.
+
+        When a cold node (no latency data) has high unfinished count,
+        it should not be selected over warm nodes with lower unfinished.
+        """
+        from collections import deque
+
+        mol = create_routing_strategy(RoutingStrategy.MIN_OBSERVED_LATENCY)
+        cands = {
+            'http://node1:8000': NodeStatus(
+                models=['model-a'],
+                speed=10.0,
+                unfinished=1,  # low unfinished
+                latency=deque([1.0, 1.0, 1.0]),  # avg = 1.0
+            ),
+            'http://node2:8000': NodeStatus(
+                models=['model-a'],
+                speed=20.0,
+                unfinished=5,  # high unfinished
+                latency=deque(),  # empty, gets avg = 1.0
+            ),
+        }
+        # Both nodes have same latency (1.0), select by unfinished
+        # node1 has unfinished=1 (min), should always be selected
+        for _ in range(10):
+            url = mol.select_node('model-a', cands)
+            assert url == 'http://node1:8000'
