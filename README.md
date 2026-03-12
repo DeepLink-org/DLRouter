@@ -13,7 +13,7 @@ A high-performance router / load balancer for large language model (LLM) inferen
   - `min_observed_latency` — Pick the node with the lowest measured average latency.
 - **Multi-Backend Architecture** — Pluggable backend adapters via the `BaseBackend` interface. Currently supported:
   - **LMDeploy** (including PD disaggregation / DistServe)
-  - **vLLM** (interface reserved, coming soon)
+  - **vLLM** (standard OpenAI-compatible API forwarding)
 - **PD Disaggregation (DistServe)** — First-class support for LMDeploy's Prefill-Decode separation, with automatic PD connection management and migration request handling.
 - **Dynamic Node Management** — Register, remove, and terminate backend nodes at runtime via REST API.
 - **Automatic Health Checks** — Background heartbeat thread removes unhealthy nodes automatically.
@@ -40,6 +40,7 @@ DLRouter/
 │   ├── backends/
 │   │   ├── base.py            # Abstract backend interface
 │   │   ├── lmdeploy_backend.py # LMDeploy adapter (+ PD disagg)
+│   │   ├── vllm_backend.py    # vLLM adapter
 │   │   └── factory.py         # Backend factory
 │   ├── core/
 │   │   ├── node_manager.py    # Node registry & lifecycle
@@ -56,7 +57,12 @@ DLRouter/
 │       ├── load_aware.py      # min_expected / min_observed latency
 │       └── factory.py         # Strategy factory
 ├── tests/
-│   └── test_routing.py        # Routing strategy unit tests
+│   ├── backends/
+│   │   └── test_vllm_backend.py   # vLLM backend unit tests
+│   ├── routing/
+│   │   └── test_routing.py        # Routing strategy unit tests
+│   └── utils/
+│       └── test_request_key.py    # Request key extraction tests
 ├── Makefile                   # Dev commands (format, lint, test, etc.)
 └── pyproject.toml             # Project metadata & tool configuration
 ```
@@ -214,9 +220,10 @@ Client (OpenAI SDK / curl)
    Routing Strategy
    (RR / Random / Hash / Load-aware)
         │
-        ├──► Backend Node 1 (LMDeploy)
-        ├──► Backend Node 2 (LMDeploy)
-        └──► Backend Node 3 (LMDeploy)
+        ├──► Backend Node 1
+        ├──► Backend Node 2
+        └──► Backend Node 3
+             (all nodes use the same backend type, configured via --backend)
 ```
 
 **DistServe (PD Disaggregation) mode:**

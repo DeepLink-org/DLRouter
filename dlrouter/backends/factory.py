@@ -4,6 +4,7 @@ from dlrouter.backends.base import BaseBackend
 from dlrouter.backends.lmdeploy_backend import (
     LMDeployBackend,
 )
+from dlrouter.backends.vllm_backend import VLLMBackend
 from dlrouter.config import BackendConfig, LMDeployPDConfig
 from dlrouter.constants import BackendType
 
@@ -27,5 +28,5 @@ def create_backend(
     if config.type == BackendType.LMDEPLOY:
         return LMDeployBackend(pd_config=pd_config)
     if config.type == BackendType.VLLM:
-        raise NotImplementedError('vLLM backend is not yet implemented. Coming in a future release.')
+        return VLLMBackend()
     raise ValueError(f'Unsupported backend: {config.type}. Available: {[e.value for e in BackendType]}')
