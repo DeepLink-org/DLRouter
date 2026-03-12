@@ -65,13 +65,12 @@ class MinExpectedLatencyStrategy(BaseRoutingStrategy):
 
 
 class MinObservedLatencyStrategy(BaseRoutingStrategy):
-    """Select the node with minimum observed latency.
+    """Select the node with minimum expected waiting time.
 
-    Based on average latency of recent requests.
+    Expected waiting time = unfinished_requests * avg_observed_latency.
 
-    Note: To avoid "winner-takes-all" problem in multi-node scenarios,
-    when multiple nodes have similar latencies (within 50% of the minimum),
-    randomly select among them to achieve load balancing.
+    This combines both queue depth and historical latency to estimate
+    how long a new request would need to wait on each node.
 
     Cold start handling:
     - If all nodes have no data: use default latency 1.0
@@ -85,7 +84,7 @@ class MinObservedLatencyStrategy(BaseRoutingStrategy):
         candidates: dict[str, NodeStatus],
         request_key: Optional[str] = None,
     ) -> Optional[str]:
-        """Pick node with lowest observed latency."""
+        """Pick node with lowest expected waiting time (unfinished * latency)."""
         matched = self._filter_by_model(model_name, candidates)
         if not matched:
             return None
@@ -112,19 +111,14 @@ class MinObservedLatencyStrategy(BaseRoutingStrategy):
             else:
                 lat_map[url] = avg_latency  # Use average of existing data for cold nodes
 
-        min_lat = min(lat_map.values())
+        # Calculate expected waiting time: unfinished * latency
+        wait_map = {}
+        for url, lat in lat_map.items():
+            wait_map[url] = matched[url].unfinished * lat
 
-        # Find all nodes with latency within 50% of the minimum
-        similar = [url for url, lat in lat_map.items() if lat < min_lat * 1.5]
+        min_wait = min(wait_map.values())
 
-        # Among similar latency nodes, select the one with minimum unfinished
-        min_unfinished = min(matched[url].unfinished for url in similar)
-        best = [url for url in similar if matched[url].unfinished == min_unfinished]
+        # Find all nodes with minimum expected waiting time (allow small tolerance for float)
+        best = [url for url, wait in wait_map.items() if wait <= min_wait + 1e-9]
         selected = _random.choice(best)
-
-        logger.debug(
-            f'MinObservedLatency: min_lat={min_lat:.3f}, avg_for_cold={avg_latency:.3f}, '
-            f'similar={len(similar)}, best_unfinished={min_unfinished}, '
-            f'candidates={len(best)}, selected={selected}'
-        )
         return selected
