@@ -92,7 +92,168 @@ class TestMinObservedLatency:
     def test_basic(self):
         mol = create_routing_strategy(RoutingStrategy.MIN_OBSERVED_LATENCY)
         cands = _make_candidates()
-        # Both have empty latency -> inf
+        # Both have empty latency -> default 1.0
         # Should still return something
         url = mol.select_node('model-a', cands)
         assert url is not None
+
+    def test_cold_start_all_empty_latency(self):
+        """Test when all nodes have empty latency (cold start).
+
+        All nodes should get default latency 1.0.
+        Expected wait = unfinished * 1.0, so select node with min unfinished.
+        """
+        mol = create_routing_strategy(RoutingStrategy.MIN_OBSERVED_LATENCY)
+        cands = {
+            'http://node1:8000': NodeStatus(
+                models=['model-a'],
+                speed=10.0,
+                unfinished=2,  # wait = 2 * 1.0 = 2.0
+            ),
+            'http://node2:8000': NodeStatus(
+                models=['model-a'],
+                speed=20.0,
+                unfinished=1,  # wait = 1 * 1.0 = 1.0 (min)
+            ),
+        }
+        # node2: wait = 1 * 1.0 = 1.0, should always be selected
+        for _ in range(10):
+            url = mol.select_node('model-a', cands)
+            assert url == 'http://node2:8000'
+
+    def test_mixed_latency_and_empty(self):
+        """Test when some nodes have latency data and some don't.
+
+        Empty latency nodes get avg latency of nodes with data.
+        Expected wait = unfinished * latency.
+        """
+        from collections import deque
+
+        mol = create_routing_strategy(RoutingStrategy.MIN_OBSERVED_LATENCY)
+        cands = {
+            'http://node1:8000': NodeStatus(
+                models=['model-a'],
+                speed=10.0,
+                unfinished=2,
+                latency=deque([0.1, 0.2, 0.1]),  # avg=0.133, wait=2*0.133=0.267
+            ),
+            'http://node2:8000': NodeStatus(
+                models=['model-a'],
+                speed=20.0,
+                unfinished=1,
+                latency=deque(),  # empty, gets avg=0.133, wait=1*0.133=0.133
+            ),
+        }
+        # node2: wait = 1 * 0.133 = 0.133 (min)
+        for _ in range(10):
+            url = mol.select_node('model-a', cands)
+            assert url == 'http://node2:8000'
+
+    def test_tradeoff_latency_vs_unfinished(self):
+        """Test tradeoff between latency and unfinished count.
+
+        A node with lower latency but higher unfinished may have higher
+        expected wait than a node with higher latency but lower unfinished.
+        """
+        from collections import deque
+
+        mol = create_routing_strategy(RoutingStrategy.MIN_OBSERVED_LATENCY)
+        cands = {
+            'http://node1:8000': NodeStatus(
+                models=['model-a'],
+                speed=10.0,
+                unfinished=10,
+                latency=deque([0.1, 0.1, 0.1]),  # avg=0.1, wait=10*0.1=1.0
+            ),
+            'http://node2:8000': NodeStatus(
+                models=['model-a'],
+                speed=20.0,
+                unfinished=2,
+                latency=deque([0.4, 0.4, 0.4]),  # avg=0.4, wait=2*0.4=0.8 (min)
+            ),
+        }
+        # node1 has lower latency but higher wait time
+        # node2 has higher latency but lower wait time -> should be selected
+        for _ in range(10):
+            url = mol.select_node('model-a', cands)
+            assert url == 'http://node2:8000'
+
+    def test_zero_unfinished_wins(self):
+        """Test that zero unfinished always wins (wait=0)."""
+        from collections import deque
+
+        mol = create_routing_strategy(RoutingStrategy.MIN_OBSERVED_LATENCY)
+        cands = {
+            'http://node1:8000': NodeStatus(
+                models=['model-a'],
+                speed=10.0,
+                unfinished=0,  # wait = 0 * 0.5 = 0 (always min)
+                latency=deque([0.5, 0.5, 0.5]),
+            ),
+            'http://node2:8000': NodeStatus(
+                models=['model-a'],
+                speed=20.0,
+                unfinished=1,
+                latency=deque([0.1, 0.1, 0.1]),  # wait = 1 * 0.1 = 0.1
+            ),
+        }
+        # node1 has zero unfinished -> wait = 0, always selected
+        for _ in range(10):
+            url = mol.select_node('model-a', cands)
+            assert url == 'http://node1:8000'
+
+    def test_same_wait_random_tie_break(self):
+        """Test random tie-break when expected wait times are equal."""
+        from collections import deque
+
+        mol = create_routing_strategy(RoutingStrategy.MIN_OBSERVED_LATENCY)
+        cands = {
+            'http://node1:8000': NodeStatus(
+                models=['model-a'],
+                speed=10.0,
+                unfinished=2,
+                latency=deque([0.5, 0.5, 0.5]),  # wait = 2 * 0.5 = 1.0
+            ),
+            'http://node2:8000': NodeStatus(
+                models=['model-a'],
+                speed=20.0,
+                unfinished=5,
+                latency=deque([0.2, 0.2, 0.2]),  # wait = 5 * 0.2 = 1.0
+            ),
+        }
+        # Both have same expected wait (1.0), should randomly select
+        results = set()
+        for _ in range(20):
+            url = mol.select_node('model-a', cands)
+            results.add(url)
+        # Should hit both nodes
+        assert len(results) == 2
+
+    def test_cold_node_with_high_unfinished(self):
+        """Test that cold node with high unfinished is not preferred.
+
+        When a cold node (no latency data) has high unfinished count,
+        it should not be selected over warm nodes with lower expected wait.
+        """
+        from collections import deque
+
+        mol = create_routing_strategy(RoutingStrategy.MIN_OBSERVED_LATENCY)
+        cands = {
+            'http://node1:8000': NodeStatus(
+                models=['model-a'],
+                speed=10.0,
+                unfinished=1,
+                latency=deque([1.0, 1.0, 1.0]),  # avg=1.0, wait=1*1.0=1.0
+            ),
+            'http://node2:8000': NodeStatus(
+                models=['model-a'],
+                speed=20.0,
+                unfinished=5,
+                latency=deque(),  # empty, gets avg=1.0, wait=5*1.0=5.0
+            ),
+        }
+        # node1: wait = 1.0, node2: wait = 5.0
+        # node1 should always be selected
+        for _ in range(10):
+            url = mol.select_node('model-a', cands)
+            assert url == 'http://node1:8000'
