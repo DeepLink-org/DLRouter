@@ -5,12 +5,8 @@ from typing import Optional
 
 import numpy as np
 
-from dlrouter.logger import get_logger
 from dlrouter.models.node import NodeStatus
 from dlrouter.routing.base import BaseRoutingStrategy
-
-
-logger = get_logger('dlrouter.proxy_engine')
 
 
 class MinExpectedLatencyStrategy(BaseRoutingStrategy):
