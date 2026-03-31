@@ -69,6 +69,13 @@ class BaseBackend(ABC):
             True if healthy, False otherwise.
         """
 
+    async def close(self) -> None:
+        """Close any persistent connections.
+
+        Should be called during application shutdown.
+        Subclasses should override this to cleanup resources.
+        """
+
     def supports_pd_disagg(self) -> bool:
         """Whether this backend supports PD disagg."""
         return False

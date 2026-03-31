@@ -22,6 +22,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+prod = [
+    "gunicorn>=21.0.0",
+]
 dev = [
     "pytest>=7.0",
     "pytest-asyncio>=0.21",
@@ -71,6 +74,9 @@ ignore = [
 "tests/**/*.py" = [
     "T20",   # allow print in tests
     "B011",  # allow assert False in tests
+]
+"dlrouter/gunicorn_conf.py" = [
+    "T20",   # allow print in gunicorn config
 ]
 "dlrouter/__main__.py" = [
     "T20",   # allow print in CLI entry point

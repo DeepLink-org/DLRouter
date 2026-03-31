@@ -94,6 +94,8 @@ def create_app(
     @app.on_event('shutdown')
     async def on_shutdown():
         health_checker.stop()
+        # Close backend connection pool
+        await backend.close()
         logger.info('DLRouter stopped.')
 
     # Store references on app for external access
