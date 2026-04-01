@@ -126,7 +126,7 @@ class ChatCompletionRequest(BaseModel):
     repetition_penalty: Optional[float] = 1.0
     user: Optional[str] = None
     tools: Optional[list[Tool]] = None
-    tool_choice: Union[ToolChoice, Literal['auto', 'required', 'none']] = 'auto'
+    tool_choice: Optional[Union[ToolChoice, Literal['auto', 'required', 'none']]] = None
     logprobs: Optional[bool] = False
     top_logprobs: Optional[int] = None
     logit_bias: Optional[dict[str, float]] = None

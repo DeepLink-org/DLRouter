@@ -69,8 +69,9 @@ class HealthChecker:
 
     def _check(self) -> None:
         """Check all nodes; remove after consecutive failures."""
-        logger.info('Running health check...')
         node_urls = list(self._manager.nodes.keys())
+        logger.info(f'start running health check, {node_urls=}')
+        start_time = time.time()
         backend = self._manager.backend
 
         loop = asyncio.new_event_loop()
@@ -98,3 +99,6 @@ class HealthChecker:
             self._manager.remove(url)
             self._fail_counts.pop(url, None)
             logger.info(f'Removed stale node: {url} (failed {self._max_failures} consecutive checks)')
+
+        end_time = time.time()
+        logger.info(f'finish running health check, {end_time - start_time:.2f}s elapsed')
