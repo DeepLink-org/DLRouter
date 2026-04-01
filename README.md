@@ -118,6 +118,12 @@ python -m dlrouter --routing_strategy consistent_hash --api_keys "sk-abc123,sk-d
 
 # PD disaggregation mode (DistServe)
 python -m dlrouter --serving_strategy distserve --link_type RoCE
+
+# Use vllm as backend
+python -m dlrouter --backend vllm
+
+# Multi works
+python -m dlrouter --workers 4
 ```
 
 ## API Reference
