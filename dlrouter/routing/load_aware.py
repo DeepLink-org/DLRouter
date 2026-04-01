@@ -3,9 +3,7 @@
 import random as _random
 from typing import Optional
 
-import numpy as np
-
-from dlrouter.models.node import NodeStatus
+from dlrouter.models.node import NodeMetrics, NodeStatus
 from dlrouter.routing.base import BaseRoutingStrategy
 
 
@@ -13,6 +11,7 @@ class MinExpectedLatencyStrategy(BaseRoutingStrategy):
     """Select the node with minimum expected latency.
 
     Expected latency = unfinished_requests / speed.
+    Uses NodeMetrics with __slots__ for optimized routing calculations.
     """
 
     def select_node(
@@ -26,47 +25,35 @@ class MinExpectedLatencyStrategy(BaseRoutingStrategy):
         if not matched:
             return None
 
-        urls_with_speed = []
-        speeds = []
-        urls_without_speed = []
+        # Convert to lightweight metrics objects
+        metrics_list: list[NodeMetrics] = [NodeMetrics.from_status(url, st) for url, st in matched.items()]
 
-        for url, st in matched.items():
-            if st.speed is not None:
-                urls_with_speed.append(url)
-                speeds.append(st.speed)
-            else:
-                urls_without_speed.append(url)
-
-        avg = sum(speeds) / len(speeds) if speeds else 1.0
-        all_urls = urls_with_speed + urls_without_speed
-        all_speeds = speeds + [avg] * len(urls_without_speed)
+        # Calculate average speed for nodes without speed data
+        speeds = [m.speed for m in metrics_list if m.speed is not None]
+        avg_speed = sum(speeds) / len(speeds) if speeds else 1.0
 
         # Shuffle to break ties randomly
-        indices = list(range(len(all_urls)))
-        _random.shuffle(indices)
+        _random.shuffle(metrics_list)
 
-        best_idx = indices[0]
+        best_url = metrics_list[0].url
         best_lat = float('inf')
-        for i in indices:
-            url = all_urls[i]
-            spd = all_speeds[i]
+        for m in metrics_list:
+            spd = m.speed if m.speed is not None else avg_speed
             if spd <= 0:
                 spd = 1e-6
-            lat = matched[url].unfinished / spd
+            lat = m.unfinished / spd
             if lat < best_lat:
                 best_lat = lat
-                best_idx = i
+                best_url = m.url
 
-        return all_urls[best_idx]
+        return best_url
 
 
 class MinObservedLatencyStrategy(BaseRoutingStrategy):
     """Select the node with minimum expected waiting time.
 
     Expected waiting time = unfinished_requests * avg_observed_latency.
-
-    This combines both queue depth and historical latency to estimate
-    how long a new request would need to wait on each node.
+    Uses NodeMetrics with __slots__ for optimized routing calculations.
 
     Cold start handling:
     - If all nodes have no data: use default latency 1.0
@@ -80,41 +67,28 @@ class MinObservedLatencyStrategy(BaseRoutingStrategy):
         candidates: dict[str, NodeStatus],
         request_key: Optional[str] = None,
     ) -> Optional[str]:
-        """Pick node with lowest expected waiting time (unfinished * latency)."""
+        """Pick node with lowest expected waiting time."""
         matched = self._filter_by_model(model_name, candidates)
         if not matched:
             return None
 
+        # Convert to lightweight metrics objects
+        metrics_list: list[NodeMetrics] = [NodeMetrics.from_status(url, st) for url, st in matched.items()]
+
         # Calculate average latency for nodes with data
-        latencies_with_data = []
-        for st in matched.values():
-            if st.latency:
-                latencies_with_data.append(float(np.mean(np.array(list(st.latency)))))
+        latencies = [m.avg_latency for m in metrics_list if m.avg_latency]
+        avg_latency = sum(latencies) / len(latencies) if latencies else 1.0
 
-        # If no nodes have data, use default latency for all
-        # If some nodes have data, use average of existing data for cold start nodes
-        avg_latency = (
-            sum(latencies_with_data) / len(latencies_with_data)
-            if latencies_with_data
-            else 1.0  # Default when all nodes are cold
-        )
+        # Calculate expected waiting time for each node
+        wait_times: list[tuple[str, float]] = []
+        for m in metrics_list:
+            lat = m.avg_latency if m.avg_latency else avg_latency
+            wait = m.unfinished * lat
+            wait_times.append((m.url, wait))
 
-        # Build latency map
-        lat_map = {}
-        for url, st in matched.items():
-            if st.latency:
-                lat_map[url] = float(np.mean(np.array(list(st.latency))))
-            else:
-                lat_map[url] = avg_latency  # Use average of existing data for cold nodes
+        # Find minimum wait time
+        min_wait = min(w for _, w in wait_times)
 
-        # Calculate expected waiting time: unfinished * latency
-        wait_map = {}
-        for url, lat in lat_map.items():
-            wait_map[url] = matched[url].unfinished * lat
-
-        min_wait = min(wait_map.values())
-
-        # Find all nodes with minimum expected waiting time (allow small tolerance for float)
-        best = [url for url, wait in wait_map.items() if wait <= min_wait + 1e-9]
-        selected = _random.choice(best)
-        return selected
+        # Select randomly among best candidates (tolerance for float)
+        best = [url for url, wait in wait_times if wait <= min_wait + 1e-9]
+        return _random.choice(best)

@@ -5,8 +5,11 @@ Usage:
     dlrouter [OPTIONS]
 
 Examples:
-    # Start with defaults
+    # Start with defaults (single process)
     python -m dlrouter
+
+    # Multi-process mode with 4 workers
+    python -m dlrouter --workers 4
 
     # Custom port and strategy
     python -m dlrouter --server_port 9000 \
@@ -17,6 +20,7 @@ Examples:
 """
 
 import os
+import sys
 from typing import Literal, Optional, Union
 
 import fire
@@ -61,6 +65,7 @@ def serve(
     link_type: Literal['RoCE', 'IB'] = 'RoCE',
     with_gdr: bool = True,
     dummy_prefill: bool = False,
+    workers: int = 1,
 ):
     """Launch the DLRouter proxy server.
 
@@ -81,6 +86,8 @@ def serve(
         link_type: RDMA link type.
         with_gdr: Enable GPU Direct RDMA.
         dummy_prefill: Use dummy prefill for testing.
+        workers: Number of worker processes. Use >1 for
+            multi-process mode (requires gunicorn).
     """
     # Parse api_keys
     if isinstance(api_keys, str):
@@ -109,6 +116,19 @@ def serve(
     # Set log level
     logger.setLevel(log_level.upper())
 
+    # Multi-process mode with Gunicorn
+    if workers > 1:
+        _run_with_gunicorn(
+            server_name=server_name,
+            server_port=server_port,
+            workers=workers,
+            log_level=log_level,
+            ssl=ssl,
+            config=config,
+        )
+        return
+
+    # Single-process mode with Uvicorn
     # Create app
     app = create_app(config)
 
@@ -129,6 +149,91 @@ def serve(
         ssl_keyfile=ssl_keyfile,
         ssl_certfile=ssl_certfile,
     )
+
+
+def _run_with_gunicorn(
+    server_name: str,
+    server_port: int,
+    workers: int,
+    log_level: str,
+    ssl: bool,
+    config: RouterConfig,
+) -> None:
+    """Run DLRouter with Gunicorn for multi-process mode.
+
+    Gunicorn provides:
+    - Multiple worker processes for CPU parallelism
+    - Automatic worker management and restart
+    - Better resource utilization
+    """
+    try:
+        import gunicorn.app.base
+    except ImportError:
+        print(
+            'Error: gunicorn is required for multi-process mode.\nInstall it with: pip install gunicorn',
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    class DLRouterApplication(gunicorn.app.base.BaseApplication):
+        """Custom Gunicorn application."""
+
+        def __init__(self, app_factory, options=None):
+            self.app_factory = app_factory
+            self.options = options or {}
+            super().__init__()
+
+        def load_config(self):
+            for key, value in self.options.items():
+                if key in self.cfg.settings and value is not None:
+                    self.cfg.set(key.lower(), value)
+
+        def load(self):
+            return self.app_factory()
+
+    # Build Gunicorn options
+    bind = f'{server_name}:{server_port}'
+    gunicorn_options = {
+        'bind': bind,
+        'workers': workers,
+        'worker_class': 'uvicorn.workers.UvicornWorker',
+        'timeout': 120,
+        'keepalive': 5,
+        'loglevel': log_level.lower(),
+        'accesslog': '-',
+        'errorlog': '-',
+        'proc_name': 'dlrouter',
+        'max_requests': 10000,
+        'max_requests_jitter': 1000,
+    }
+
+    # SSL configuration
+    if ssl:
+        ssl_keyfile = os.environ.get('SSL_KEYFILE')
+        ssl_certfile = os.environ.get('SSL_CERTFILE')
+        if ssl_keyfile:
+            gunicorn_options['keyfile'] = ssl_keyfile
+        if ssl_certfile:
+            gunicorn_options['certfile'] = ssl_certfile
+
+    print(
+        f'Starting DLRouter with {workers} workers on {bind}...',
+    )
+
+    # Store config in environment for worker processes
+    os.environ['DLROUTER_CONFIG_JSON'] = config.model_dump_json()
+
+    # Create app factory that reads config from environment
+    def app_factory():
+        config_json = os.environ.get('DLROUTER_CONFIG_JSON')
+        if config_json:
+            cfg = RouterConfig.model_validate_json(config_json)
+        else:
+            cfg = RouterConfig()
+        return create_app(cfg)
+
+    # Run Gunicorn
+    DLRouterApplication(app_factory, gunicorn_options).run()
 
 
 def main():

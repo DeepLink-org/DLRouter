@@ -29,7 +29,7 @@ class _AsyncLines:
 
 
 def _make_session_mock(status: int = 200, body: bytes = b'', exception=None):
-    """Build a mock aiohttp.ClientSession context manager chain.
+    """Build a mock aiohttp.ClientSession for the persistent session pattern.
 
     Returns (session_mock, response_mock) so callers can inspect them.
     """
@@ -45,15 +45,25 @@ def _make_session_mock(status: int = 200, body: bytes = b'', exception=None):
         req_ctx.__aenter__ = AsyncMock(return_value=resp)
     req_ctx.__aexit__ = AsyncMock(return_value=False)
 
-    session = AsyncMock()
+    # Create a mock session (not context manager, direct session object)
+    session = MagicMock()
     session.post = MagicMock(return_value=req_ctx)
     session.get = MagicMock(return_value=req_ctx)
+    session.closed = False
 
-    sess_ctx = AsyncMock()
-    sess_ctx.__aenter__ = AsyncMock(return_value=session)
-    sess_ctx.__aexit__ = AsyncMock(return_value=False)
+    return session, resp
 
-    return sess_ctx, resp
+
+async def _get_backend_with_mock_session(
+    status: int = 200,
+    body: bytes = b'',
+    exception=None,
+):
+    """Create a VLLMBackend with mocked _get_session."""
+    session, resp = _make_session_mock(status, body, exception)
+    backend = VLLMBackend()
+    backend._get_session = AsyncMock(return_value=session)
+    return backend, session, resp
 
 
 # ---------------------------------------------------------------------------
@@ -80,18 +90,27 @@ class TestFactory:
 
 class TestForwardRequest:
     async def test_success(self):
-        sess_ctx, _ = _make_session_mock(status=200, body=b'{"choices":[]}')
-        with patch('aiohttp.ClientSession', return_value=sess_ctx):
-            backend = VLLMBackend()
-            result = await backend.forward_request(NODE_URL, '/v1/chat/completions', {'model': 'x'})
+        backend, _, _ = await _get_backend_with_mock_session(
+            status=200,
+            body=b'{"choices":[]}',
+        )
+        result = await backend.forward_request(
+            NODE_URL,
+            '/v1/chat/completions',
+            {'model': 'x'},
+        )
         assert result == '{"choices":[]}'
 
     async def test_raises_on_connection_error(self):
-        sess_ctx, _ = _make_session_mock(exception=aiohttp.ClientConnectionError('refused'))
-        with patch('aiohttp.ClientSession', return_value=sess_ctx):
-            backend = VLLMBackend()
-            with pytest.raises(aiohttp.ClientConnectionError):
-                await backend.forward_request(NODE_URL, '/v1/chat/completions', {})
+        backend, _, _ = await _get_backend_with_mock_session(
+            exception=aiohttp.ClientConnectionError('refused'),
+        )
+        with pytest.raises(aiohttp.ClientConnectionError):
+            await backend.forward_request(
+                NODE_URL,
+                '/v1/chat/completions',
+                {},
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -102,21 +121,33 @@ class TestForwardRequest:
 class TestStreamForward:
     async def test_yields_non_empty_lines(self):
         body = b'data: {"id":1}\ndata: [DONE]'
-        sess_ctx, _ = _make_session_mock(status=200, body=body)
-        with patch('aiohttp.ClientSession', return_value=sess_ctx):
-            backend = VLLMBackend()
-            chunks = [chunk async for chunk in backend.stream_forward(NODE_URL, '/v1/chat/completions', {})]
+        backend, _, _ = await _get_backend_with_mock_session(
+            status=200,
+            body=body,
+        )
+        chunks = [
+            chunk
+            async for chunk in backend.stream_forward(
+                NODE_URL,
+                '/v1/chat/completions',
+                {},
+            )
+        ]
         assert len(chunks) > 0
         combined = b''.join(chunks)
         assert b'data: {"id":1}' in combined
 
     async def test_raises_on_error(self):
-        sess_ctx, _ = _make_session_mock(exception=aiohttp.ServerConnectionError('server error'))
-        with patch('aiohttp.ClientSession', return_value=sess_ctx):
-            backend = VLLMBackend()
-            with pytest.raises(aiohttp.ServerConnectionError):
-                async for _ in backend.stream_forward(NODE_URL, '/v1/chat/completions', {}):
-                    pass
+        backend, _, _ = await _get_backend_with_mock_session(
+            exception=aiohttp.ServerConnectionError('server error'),
+        )
+        with pytest.raises(aiohttp.ServerConnectionError):
+            async for _ in backend.stream_forward(
+                NODE_URL,
+                '/v1/chat/completions',
+                {},
+            ):
+                pass
 
 
 # ---------------------------------------------------------------------------
@@ -135,7 +166,10 @@ class TestFetchModels:
         }
         mock_resp.raise_for_status = MagicMock()
 
-        with patch('dlrouter.backends.vllm_backend.requests.get', return_value=mock_resp):
+        with patch(
+            'dlrouter.backends.vllm_backend.requests.get',
+            return_value=mock_resp,
+        ):
             backend = VLLMBackend()
             models = backend.fetch_models(NODE_URL)
 
@@ -146,7 +180,10 @@ class TestFetchModels:
         mock_resp.json.return_value = {'data': []}
         mock_resp.raise_for_status = MagicMock()
 
-        with patch('dlrouter.backends.vllm_backend.requests.get', return_value=mock_resp):
+        with patch(
+            'dlrouter.backends.vllm_backend.requests.get',
+            return_value=mock_resp,
+        ):
             backend = VLLMBackend()
             models = backend.fetch_models(NODE_URL)
 
@@ -168,22 +205,46 @@ class TestFetchModels:
 # ---------------------------------------------------------------------------
 
 
+def _make_session_ctx_mock(status: int = 200, exception=None):
+    """Build a mock for aiohttp.ClientSession as async context manager."""
+    resp = AsyncMock()
+    resp.status = status
+
+    req_ctx = AsyncMock()
+    if exception:
+        req_ctx.__aenter__ = AsyncMock(side_effect=exception)
+    else:
+        req_ctx.__aenter__ = AsyncMock(return_value=resp)
+    req_ctx.__aexit__ = AsyncMock(return_value=False)
+
+    session = MagicMock()
+    session.get = MagicMock(return_value=req_ctx)
+
+    session_ctx = AsyncMock()
+    session_ctx.__aenter__ = AsyncMock(return_value=session)
+    session_ctx.__aexit__ = AsyncMock(return_value=False)
+
+    return session_ctx
+
+
 class TestCheckHealth:
     async def test_healthy_200(self):
-        sess_ctx, _ = _make_session_mock(status=200)
-        with patch('aiohttp.ClientSession', return_value=sess_ctx):
+        session_ctx = _make_session_ctx_mock(status=200)
+        with patch('aiohttp.ClientSession', return_value=session_ctx):
             backend = VLLMBackend()
             assert await backend.check_health(NODE_URL) is True
 
     async def test_unhealthy_non_200(self):
-        sess_ctx, _ = _make_session_mock(status=503)
-        with patch('aiohttp.ClientSession', return_value=sess_ctx):
+        session_ctx = _make_session_ctx_mock(status=503)
+        with patch('aiohttp.ClientSession', return_value=session_ctx):
             backend = VLLMBackend()
             assert await backend.check_health(NODE_URL) is False
 
     async def test_connection_error_returns_false(self):
-        sess_ctx, _ = _make_session_mock(exception=aiohttp.ClientConnectionError('refused'))
-        with patch('aiohttp.ClientSession', return_value=sess_ctx):
+        session_ctx = _make_session_ctx_mock(
+            exception=aiohttp.ClientConnectionError('refused'),
+        )
+        with patch('aiohttp.ClientSession', return_value=session_ctx):
             backend = VLLMBackend()
             assert await backend.check_health(NODE_URL) is False
 
