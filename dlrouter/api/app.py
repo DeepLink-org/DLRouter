@@ -1,7 +1,9 @@
 """FastAPI application factory."""
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
 from dlrouter.api.middleware import set_api_keys
 from dlrouter.api.routes import (
@@ -16,6 +18,23 @@ from dlrouter.core.health_check import HealthChecker
 from dlrouter.core.node_manager import NodeManager
 from dlrouter.core.proxy_engine import ProxyEngine
 from dlrouter.logger import get_logger
+
+
+async def log_validation_error(request: Request, exc: RequestValidationError):
+    """Log full request body on validation error."""
+    try:
+        body = await request.body()
+        body_text = body.decode('utf-8', errors='replace')
+    except Exception:
+        body_text = '<unable to read body>'
+
+    logger.error(f'Validation error for {request.method} {request.url.path}. Body: {body_text}. Errors: {exc.errors()}')
+
+    # Return standard 422 response
+    return JSONResponse(
+        status_code=422,
+        content={'detail': exc.errors()},
+    )
 
 
 logger = get_logger('dlrouter.app')
@@ -42,6 +61,9 @@ def create_app(
         version='0.1.0',
         docs_url='/',
     )
+
+    # Register validation error handler to log full request body
+    app.add_exception_handler(RequestValidationError, log_validation_error)
 
     # CORS
     app.add_middleware(
