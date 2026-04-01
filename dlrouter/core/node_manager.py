@@ -94,7 +94,13 @@ class NodeManager:
                     data = json.load(f)
                 with self._lock:
                     for url, raw in data.items():
-                        self.nodes[url] = NodeStatus.model_validate_json(raw)
+                        status = NodeStatus.model_validate_json(raw)
+                        # Re-create deque with maxlen since Pydantic loses maxlen during deserialization
+                        status.latency = deque(
+                            list(status.latency)[-LATENCY_DEQUE_LEN:],
+                            maxlen=LATENCY_DEQUE_LEN,
+                        )
+                        self.nodes[url] = status
         except Exception as e:
             logger.warning(f'Failed to load config: {e}')
 
