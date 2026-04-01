@@ -90,15 +90,15 @@ class HealthChecker:
         start_time = time.time()
 
         backend = self._manager.backend
-        loop = asyncio.new_event_loop()
-
+        # Use asyncio.run() to properly set up the async environment
+        # instead of manually creating and managing the event loop
         try:
-            # Check all nodes in parallel batches
-            results = loop.run_until_complete(
+            results = asyncio.run(
                 self._check_nodes_batch(backend, node_urls),
             )
-        finally:
-            loop.close()
+        except Exception as e:
+            logger.error(f'Health check batch error: {e}')
+            return
 
         # Process results
         stale = []

@@ -205,20 +205,48 @@ class TestFetchModels:
 # ---------------------------------------------------------------------------
 
 
+def _make_session_ctx_mock(status: int = 200, exception=None):
+    """Build a mock for aiohttp.ClientSession as async context manager."""
+    resp = AsyncMock()
+    resp.status = status
+
+    req_ctx = AsyncMock()
+    if exception:
+        req_ctx.__aenter__ = AsyncMock(side_effect=exception)
+    else:
+        req_ctx.__aenter__ = AsyncMock(return_value=resp)
+    req_ctx.__aexit__ = AsyncMock(return_value=False)
+
+    session = MagicMock()
+    session.get = MagicMock(return_value=req_ctx)
+
+    session_ctx = AsyncMock()
+    session_ctx.__aenter__ = AsyncMock(return_value=session)
+    session_ctx.__aexit__ = AsyncMock(return_value=False)
+
+    return session_ctx
+
+
 class TestCheckHealth:
     async def test_healthy_200(self):
-        backend, _, _ = await _get_backend_with_mock_session(status=200)
-        assert await backend.check_health(NODE_URL) is True
+        session_ctx = _make_session_ctx_mock(status=200)
+        with patch('aiohttp.ClientSession', return_value=session_ctx):
+            backend = VLLMBackend()
+            assert await backend.check_health(NODE_URL) is True
 
     async def test_unhealthy_non_200(self):
-        backend, _, _ = await _get_backend_with_mock_session(status=503)
-        assert await backend.check_health(NODE_URL) is False
+        session_ctx = _make_session_ctx_mock(status=503)
+        with patch('aiohttp.ClientSession', return_value=session_ctx):
+            backend = VLLMBackend()
+            assert await backend.check_health(NODE_URL) is False
 
     async def test_connection_error_returns_false(self):
-        backend, _, _ = await _get_backend_with_mock_session(
+        session_ctx = _make_session_ctx_mock(
             exception=aiohttp.ClientConnectionError('refused'),
         )
-        assert await backend.check_health(NODE_URL) is False
+        with patch('aiohttp.ClientSession', return_value=session_ctx):
+            backend = VLLMBackend()
+            assert await backend.check_health(NODE_URL) is False
 
 
 # ---------------------------------------------------------------------------

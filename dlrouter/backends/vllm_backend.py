@@ -49,9 +49,9 @@ class VLLMBackend(BaseBackend):
             'ttl_dns_cache': 300,  # DNS cache TTL in seconds
             'enable_cleanup_closed': True,
         }
-        # Lazy-initialized session
+        # Lazy-initialized session (bound to specific event loop)
         self._session: Optional[aiohttp.ClientSession] = None
-        self._session_lock = asyncio.Lock()
+        self._session_lock: Optional[asyncio.Lock] = None
 
     # -- Session management --
 
@@ -59,7 +59,14 @@ class VLLMBackend(BaseBackend):
         """Get or create a persistent aiohttp session.
 
         Uses double-checked locking for thread-safe lazy initialization.
+        The lock is lazily created to ensure it's bound to the
+        correct event loop.
         """
+        # Lazily create the lock to ensure it's bound to
+        # the current event loop
+        if self._session_lock is None:
+            self._session_lock = asyncio.Lock()
+
         if self._session is None or self._session.closed:
             async with self._session_lock:
                 if self._session is None or self._session.closed:
@@ -139,15 +146,19 @@ class VLLMBackend(BaseBackend):
             return []
 
     async def check_health(self, node_url: str) -> bool:
-        """Check vLLM node health via async request."""
-        session = await self._get_session()
+        """Check vLLM node health via async request.
+
+        Uses a temporary session to avoid event loop binding issues
+        when called from different threads (e.g., health check thread).
+        """
         url = f'{node_url}/health'
         try:
-            async with session.get(
-                url,
-                timeout=self._health_timeout,
-            ) as resp:
-                return resp.status == 200
+            async with aiohttp.ClientSession() as session:
+                async with session.get(
+                    url,
+                    timeout=self._health_timeout,
+                ) as resp:
+                    return resp.status == 200
         except Exception as e:
             logger.error(f'Failed to check health from {node_url}: {e}')
             return False
