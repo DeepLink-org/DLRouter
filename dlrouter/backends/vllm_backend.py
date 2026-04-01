@@ -153,12 +153,14 @@ class VLLMBackend(BaseBackend):
         """
         url = f'{node_url}/health'
         try:
-            async with aiohttp.ClientSession() as session:
-                async with session.get(
+            async with (
+                aiohttp.ClientSession() as session,
+                session.get(
                     url,
                     timeout=self._health_timeout,
-                ) as resp:
-                    return resp.status == 200
+                ) as resp,
+            ):
+                return resp.status == 200
         except Exception as e:
             logger.error(f'Failed to check health from {node_url}: {e}')
             return False

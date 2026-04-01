@@ -16,7 +16,7 @@ class NodeMetrics:
     repeated attribute lookups on the heavier NodeStatus model.
     """
 
-    __slots__ = ('url', 'unfinished', 'speed', 'avg_latency')
+    __slots__ = ('avg_latency', 'speed', 'unfinished', 'url')
 
     def __init__(
         self,

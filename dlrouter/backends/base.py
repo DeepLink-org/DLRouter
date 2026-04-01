@@ -69,6 +69,7 @@ class BaseBackend(ABC):
             True if healthy, False otherwise.
         """
 
+    @abstractmethod
     async def close(self) -> None:
         """Close any persistent connections.
 

@@ -226,10 +226,7 @@ def _run_with_gunicorn(
     # Create app factory that reads config from environment
     def app_factory():
         config_json = os.environ.get('DLROUTER_CONFIG_JSON')
-        if config_json:
-            cfg = RouterConfig.model_validate_json(config_json)
-        else:
-            cfg = RouterConfig()
+        cfg = RouterConfig.model_validate_json(config_json) if config_json else RouterConfig()
         return create_app(cfg)
 
     # Run Gunicorn

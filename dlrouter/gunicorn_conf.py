@@ -50,19 +50,15 @@ max_requests_jitter = int(os.getenv('DLROUTER_MAX_REQUESTS_JITTER', 1000))
 
 def on_starting(server):
     """Called just before the master process is initialized."""
-    pass
 
 
 def on_reload(server):
     """Called to recycle workers during a reload via SIGHUP."""
-    pass
 
 
 def worker_int(worker):
     """Called when a worker receives SIGINT or SIGQUIT."""
-    pass
 
 
 def worker_abort(worker):
     """Called when a worker receives SIGABRT."""
-    pass
