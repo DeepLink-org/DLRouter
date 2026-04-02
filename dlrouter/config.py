@@ -27,6 +27,19 @@ class LMDeployPDConfig(BaseModel):
     dummy_prefill: bool = False
 
 
+class VLLMPDConfig(BaseModel):
+    """vLLM PD disaggregation config.
+
+    This config is used when serving_strategy is VLLM_PD.
+    vLLM PD mode uses ZMQ for service discovery and request_id
+    encoding for KV cache transfer coordination.
+    """
+
+    zmq_port: int = 30001
+    zmq_host: str = '0.0.0.0'
+    ping_timeout_seconds: int = 5
+
+
 class SSLConfig(BaseModel):
     """SSL configuration."""
 
@@ -44,6 +57,7 @@ class RouterConfig(BaseModel):
     serving_strategy: ServingStrategy = ServingStrategy.HYBRID
     backend: BackendConfig = Field(default_factory=BackendConfig)
     pd_config: LMDeployPDConfig = Field(default_factory=LMDeployPDConfig)
+    vllm_pd_config: VLLMPDConfig = Field(default_factory=VLLMPDConfig)
     ssl: SSLConfig = Field(default_factory=SSLConfig)
     api_keys: Optional[list[str]] = None
     log_level: str = 'INFO'

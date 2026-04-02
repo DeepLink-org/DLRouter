@@ -259,3 +259,147 @@ class TestDeregisterNode:
         backend = VLLMBackend()
         # Should not raise
         backend.deregister_node(NODE_URL)
+
+
+# ---------------------------------------------------------------------------
+# vLLM PD Disaggregation Support
+# ---------------------------------------------------------------------------
+
+
+class _AsyncChunks:
+    """Async iterable over chunks of bytes, for mocking iter_chunked."""
+
+    def __init__(self, body: bytes, chunk_size: int = 1024) -> None:
+        self._chunks = [
+            body[i : i + chunk_size] for i in range(0, len(body), chunk_size)
+        ]
+
+    def __aiter__(self):
+        return self._gen()
+
+    async def _gen(self):
+        for chunk in self._chunks:
+            yield chunk
+
+
+def _make_session_mock_with_chunks(
+    status: int = 200,
+    body: bytes = b'',
+    exception=None,
+):
+    """Build a mock for sessions that support iter_chunked."""
+    resp = AsyncMock()
+    resp.status = status
+    resp.text = AsyncMock(return_value=body.decode())
+    resp.content = MagicMock()
+    resp.content.iter_chunked = MagicMock(return_value=_AsyncChunks(body))
+
+    req_ctx = AsyncMock()
+    if exception:
+        req_ctx.__aenter__ = AsyncMock(side_effect=exception)
+    else:
+        req_ctx.__aenter__ = AsyncMock(return_value=resp)
+    req_ctx.__aexit__ = AsyncMock(return_value=False)
+
+    session = MagicMock()
+    session.post = MagicMock(return_value=req_ctx)
+    session.closed = False
+
+    return session, resp
+
+
+class TestForwardWithRequestId:
+    async def test_success(self):
+        body = b'{"choices":[]}'
+        session, _ = _make_session_mock_with_chunks(status=200, body=body)
+        backend = VLLMBackend()
+        backend._get_session = AsyncMock(return_value=session)
+
+        result = await backend.forward_with_request_id(
+            NODE_URL,
+            '/v1/chat/completions',
+            {'model': 'x'},
+            '___prefill_addr_p___decode_addr_d_uuid',
+        )
+        assert result == '{"choices":[]}'
+
+        # Verify headers were passed
+        call_args = session.post.call_args
+        assert 'headers' in call_args.kwargs
+        assert 'X-Request-Id' in call_args.kwargs['headers']
+        assert '___prefill_addr_p' in call_args.kwargs['headers']['X-Request-Id']
+
+    async def test_raises_on_error(self):
+        session, _ = _make_session_mock_with_chunks(
+            exception=aiohttp.ClientConnectionError('refused')
+        )
+        backend = VLLMBackend()
+        backend._get_session = AsyncMock(return_value=session)
+
+        with pytest.raises(aiohttp.ClientConnectionError):
+            await backend.forward_with_request_id(
+                NODE_URL,
+                '/v1/chat/completions',
+                {},
+                'request_id',
+            )
+
+
+class TestStreamForwardWithRequestId:
+    async def test_yields_chunks(self):
+        body = b'data: {"id":1}\ndata: [DONE]'
+        session, _ = _make_session_mock_with_chunks(status=200, body=body)
+        backend = VLLMBackend()
+        backend._get_session = AsyncMock(return_value=session)
+
+        chunks = [
+            chunk
+            async for chunk in backend.stream_forward_with_request_id(
+                NODE_URL,
+                '/v1/chat/completions',
+                {},
+                '___prefill_addr_p___decode_addr_d_uuid',
+            )
+        ]
+        assert len(chunks) > 0
+        combined = b''.join(chunks)
+        assert b'data:' in combined
+
+    async def test_raises_on_error(self):
+        session, _ = _make_session_mock_with_chunks(
+            exception=aiohttp.ServerConnectionError('server error')
+        )
+        backend = VLLMBackend()
+        backend._get_session = AsyncMock(return_value=session)
+
+        with pytest.raises(aiohttp.ServerConnectionError):
+            async for _ in backend.stream_forward_with_request_id(
+                NODE_URL,
+                '/v1/chat/completions',
+                {},
+                'request_id',
+            ):
+                pass
+
+    async def test_request_id_header_is_set(self):
+        body = b'{"choices":[]}'
+        session, _ = _make_session_mock_with_chunks(status=200, body=body)
+        backend = VLLMBackend()
+        backend._get_session = AsyncMock(return_value=session)
+
+        request_id = '___prefill_addr_10.0.0.1:30001___decode_addr_10.0.0.2:30001_abc'
+
+        async for _ in backend.stream_forward_with_request_id(
+            NODE_URL,
+            '/v1/chat/completions',
+            {},
+            request_id,
+        ):
+            pass
+
+        # Verify the request_id header was set correctly
+        call_args = session.post.call_args
+        headers = call_args.kwargs['headers']
+        assert headers['X-Request-Id'] == request_id
+        assert '___prefill_addr_10.0.0.1:30001' in headers['X-Request-Id']
+        assert '___decode_addr_10.0.0.2:30001' in headers['X-Request-Id']

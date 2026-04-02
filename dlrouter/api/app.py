@@ -1,5 +1,7 @@
 """FastAPI application factory."""
 
+from typing import Optional
+
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
@@ -14,9 +16,11 @@ from dlrouter.api.routes import (
 )
 from dlrouter.backends.factory import create_backend
 from dlrouter.config import RouterConfig
+from dlrouter.constants import BackendType, ServingStrategy
 from dlrouter.core.health_check import HealthChecker
 from dlrouter.core.node_manager import NodeManager
 from dlrouter.core.proxy_engine import ProxyEngine
+from dlrouter.core.zmq_discovery import ZMQServiceDiscovery
 from dlrouter.logger import get_logger
 
 
@@ -90,8 +94,22 @@ def create_app(
         cache_status=config.cache_status,
     )
 
+    # ZMQ service discovery (for vLLM PD mode in DISTSERVE)
+    zmq_discovery: Optional[ZMQServiceDiscovery] = None
+    if (
+        config.serving_strategy == ServingStrategy.DISTSERVE
+        and config.backend.type == BackendType.VLLM
+    ):
+        zmq_discovery = ZMQServiceDiscovery(
+            host=config.vllm_pd_config.zmq_host,
+            port=config.vllm_pd_config.zmq_port,
+            ping_timeout_seconds=config.vllm_pd_config.ping_timeout_seconds,
+            node_manager=node_manager,
+            models=config.backend.extra.get('models', []),
+        )
+
     # Proxy engine
-    proxy_engine = ProxyEngine(node_manager)
+    proxy_engine = ProxyEngine(node_manager, zmq_discovery)
 
     # Inject dependencies into routes
     models.set_node_manager(node_manager)
@@ -111,11 +129,17 @@ def create_app(
     @app.on_event('startup')
     async def on_startup():
         health_checker.start()
+        # Start ZMQ service discovery if enabled
+        if zmq_discovery:
+            zmq_discovery.start()
         logger.info('DLRouter started.')
 
     @app.on_event('shutdown')
     async def on_shutdown():
         health_checker.stop()
+        # Stop ZMQ service discovery if enabled
+        if zmq_discovery:
+            zmq_discovery.stop()
         # Close backend connection pool
         await backend.close()
         logger.info('DLRouter stopped.')
@@ -124,6 +148,7 @@ def create_app(
     app.state.node_manager = node_manager
     app.state.proxy_engine = proxy_engine
     app.state.health_checker = health_checker
+    app.state.zmq_discovery = zmq_discovery
     app.state.config = config
 
     return app

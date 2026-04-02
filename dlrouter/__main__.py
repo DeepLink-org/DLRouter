@@ -15,8 +15,11 @@ Examples:
     python -m dlrouter --server_port 9000 \
         --routing_strategy round_robin
 
-    # With PD disaggregation
-    python -m dlrouter --serving_strategy distserve
+    # With LMDeploy PD disaggregation
+    python -m dlrouter --serving_strategy distserve --backend lmdeploy
+
+    # With vLLM PD disaggregation
+    python -m dlrouter --serving_strategy distserve --backend vllm
 """
 
 import os
@@ -32,6 +35,7 @@ from dlrouter.config import (
     LMDeployPDConfig,
     RouterConfig,
     SSLConfig,
+    VLLMPDConfig,
 )
 from dlrouter.constants import (
     BackendType,
@@ -65,6 +69,10 @@ def serve(
     link_type: Literal['RoCE', 'IB'] = 'RoCE',
     with_gdr: bool = True,
     dummy_prefill: bool = False,
+    zmq_host: str = '0.0.0.0',
+    zmq_port: int = 30001,
+    zmq_ping_timeout: int = 5,
+    models: Optional[str] = None,
     workers: int = 1,
 ):
     """Launch the DLRouter proxy server.
@@ -74,7 +82,7 @@ def serve(
         server_port: Listen port. Default 8000.
         backend: Inference backend type.
         routing_strategy: Request routing strategy.
-        serving_strategy: Serving mode.
+        serving_strategy: Serving mode (hybrid, distserve, vllm_pd).
         api_keys: Optional API keys (comma-separated
             string or list).
         ssl: Enable SSL (requires SSL_KEYFILE and
@@ -82,10 +90,14 @@ def serve(
         log_level: Logging level.
         disable_cache_status: Disable config caching.
         config_path: Path to config persistence file.
-        migration_protocol: PD migration protocol.
-        link_type: RDMA link type.
-        with_gdr: Enable GPU Direct RDMA.
+        migration_protocol: PD migration protocol (LMDeploy).
+        link_type: RDMA link type (LMDeploy).
+        with_gdr: Enable GPU Direct RDMA (LMDeploy).
         dummy_prefill: Use dummy prefill for testing.
+        zmq_host: ZMQ service discovery bind host (vLLM PD).
+        zmq_port: ZMQ service discovery port (vLLM PD).
+        zmq_ping_timeout: ZMQ ping timeout in seconds (vLLM PD).
+        models: Comma-separated model names for vLLM PD mode.
         workers: Number of worker processes. Use >1 for
             multi-process mode (requires gunicorn).
     """
@@ -93,18 +105,31 @@ def serve(
     if isinstance(api_keys, str):
         api_keys = api_keys.split(',')
 
+    # Parse models
+    model_list = []
+    if models:
+        model_list = models.split(',')
+
     # Build config
     config = RouterConfig(
         server_name=server_name,
         server_port=server_port,
         routing_strategy=RoutingStrategy(routing_strategy),
         serving_strategy=ServingStrategy(serving_strategy),
-        backend=BackendConfig(type=BackendType(backend)),
+        backend=BackendConfig(
+            type=BackendType(backend),
+            extra={'models': model_list},
+        ),
         pd_config=LMDeployPDConfig(
             migration_protocol=migration_protocol,
             link_type=link_type,
             with_gdr=with_gdr,
             dummy_prefill=dummy_prefill,
+        ),
+        vllm_pd_config=VLLMPDConfig(
+            zmq_host=zmq_host,
+            zmq_port=zmq_port,
+            ping_timeout_seconds=zmq_ping_timeout,
         ),
         ssl=SSLConfig(enabled=ssl),
         api_keys=api_keys,
