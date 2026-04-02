@@ -1,10 +1,11 @@
 """Proxy engine - orchestrates request forwarding.
 
-Handles both Hybrid (standard proxy) and DistServe
-(PD disaggregation) flows.
+Handles Hybrid (standard proxy), DistServe (LMDeploy PD disaggregation),
+and vLLM PD (vLLM Prefill-Decode disaggregation) flows.
 """
 
 import json
+import uuid
 from typing import TYPE_CHECKING, Any, Optional, Union
 
 from fastapi import BackgroundTasks
@@ -24,6 +25,7 @@ from dlrouter.utils.request_key import extract_request_key
 
 
 if TYPE_CHECKING:
+    from dlrouter.core.zmq_discovery import ZMQServiceDiscovery
     from dlrouter.models.protocol import (
         ChatCompletionRequest,
         CompletionRequest,
@@ -40,8 +42,13 @@ class ProxyEngine:
     backend adapter for actual request forwarding.
     """
 
-    def __init__(self, node_manager: NodeManager) -> None:
+    def __init__(
+        self,
+        node_manager: NodeManager,
+        zmq_discovery: Optional['ZMQServiceDiscovery'] = None,
+    ) -> None:
         self.manager = node_manager
+        self._zmq_discovery = zmq_discovery
 
     @property
     def backend(self):
@@ -149,6 +156,43 @@ class ProxyEngine:
     ):
         """Handle request in DistServe PD mode.
 
+        Dispatches to the appropriate PD handler based on backend type:
+        - vLLM backend with ZMQ discovery: uses handle_vllm_pd
+        - LMDeploy backend: uses handle_lmdeploy_pd
+
+        Returns:
+            StreamingResponse or JSONResponse.
+        """
+        # Check if using vLLM backend with ZMQ service discovery
+        from dlrouter.backends.vllm_backend import VLLMBackend
+
+        if isinstance(self.backend, VLLMBackend) and self._zmq_discovery is not None:
+            return await self.handle_vllm_pd(
+                request_data,
+                model_name,
+                endpoint,
+                stream,
+            )
+
+        # Otherwise use LMDeploy PD logic
+        return await self.handle_lmdeploy_pd(
+            request_data,
+            model_name,
+            endpoint,
+            stream,
+            request_key,
+        )
+
+    async def handle_lmdeploy_pd(
+        self,
+        request_data: dict[str, Any],
+        model_name: str,
+        endpoint: str,
+        stream: bool = False,
+        request_key: Optional[str] = None,
+    ):
+        """Handle request in LMDeploy PD mode.
+
         1. Send prefill request to P node
         2. Establish PD connection if needed
         3. Send decode request to D node with
@@ -231,6 +275,131 @@ class ProxyEngine:
             self.backend.unshelf_prefill_session(p_url, d_url, prefill_info['id'])
 
         return resp
+
+    # -- vLLM PD disaggregation mode --
+
+    async def _stream_generate_with_request_id(
+        self,
+        request_data: dict[str, Any],
+        node_url: str,
+        endpoint: str,
+        request_id: str,
+    ):
+        """Async generator wrapping vLLM stream with request_id."""
+        try:
+            gen = self.backend.stream_forward_with_request_id(
+                node_url, endpoint, request_data, request_id
+            )
+            async for chunk in gen:
+                yield chunk
+        except Exception as e:
+            logger.error(f'vLLM PD stream error: {e}')
+            yield self._timeout_response(node_url)
+
+    async def handle_vllm_pd(
+        self,
+        request_data: dict[str, Any],
+        model_name: str,
+        endpoint: str,
+        stream: bool = False,
+    ):
+        """Handle request in vLLM PD disaggregation mode.
+
+        Flow:
+        1. Select P/D pair from ZMQ service discovery
+        2. Build encoded request_id with ZMQ addresses
+        3. Send prefill request (max_tokens=1) to P node
+        4. Send decode request to D node with encoded request_id
+
+        Returns:
+            StreamingResponse or JSONResponse.
+        """
+        if self._zmq_discovery is None:
+            return JSONResponse(
+                {'error': 'ZMQ service discovery not configured for vLLM PD mode'},
+                status_code=500,
+            )
+
+        # Select P/D pair
+        pd_pair = self._zmq_discovery.select_pd_pair()
+        if pd_pair is None:
+            logger.warning('No P/D instances available')
+            return JSONResponse(
+                {'error': 'No prefill or decode instances available'},
+                status_code=503,
+            )
+
+        (prefill_http, prefill_zmq), (decode_http, decode_zmq) = pd_pair
+
+        # Build encoded request_id
+        base_id = uuid.uuid4().hex
+        request_id = self._zmq_discovery.build_request_id(
+            prefill_zmq, decode_zmq, base_id
+        )
+
+        logger.info(
+            f'vLLM PD: [HTTP:{prefill_http}, ZMQ:{prefill_zmq}] '
+            f'→ [HTTP:{decode_http}, ZMQ:{decode_zmq}]'
+        )
+
+        # Ensure URLs have http:// prefix
+        p_url = prefill_http if prefill_http.startswith('http') else f'http://{prefill_http}'
+        d_url = decode_http if decode_http.startswith('http') else f'http://{decode_http}'
+
+        # Prefill phase (max_tokens=1)
+        prefill_request = request_data.copy()
+        prefill_request['max_tokens'] = 1
+        if 'max_completion_tokens' in prefill_request:
+            prefill_request['max_completion_tokens'] = 1
+
+        try:
+            # Send prefill request
+            async for _ in self._vllm_pd_forward(
+                p_url, endpoint, prefill_request, request_id
+            ):
+                pass  # Consume prefill response
+        except Exception as e:
+            logger.error(f'vLLM PD prefill error: {e}')
+            return JSONResponse(
+                self._error_json(ErrorCode.BACKEND_ERROR),
+                status_code=502,
+            )
+
+        # Decode phase
+        if stream:
+            gen = self._stream_generate_with_request_id(
+                request_data, d_url, endpoint, request_id
+            )
+            return StreamingResponse(
+                gen,
+                media_type='text/event-stream',
+            )
+
+        try:
+            text = await self.backend.forward_with_request_id(
+                d_url, endpoint, request_data, request_id
+            )
+            return JSONResponse(json.loads(text))
+        except Exception as e:
+            logger.error(f'vLLM PD decode error: {e}')
+            return JSONResponse(
+                self._error_json(ErrorCode.BACKEND_ERROR),
+                status_code=502,
+            )
+
+    async def _vllm_pd_forward(
+        self,
+        node_url: str,
+        endpoint: str,
+        request_data: dict[str, Any],
+        request_id: str,
+    ):
+        """Forward request to vLLM node with request_id (async generator)."""
+        gen = self.backend.stream_forward_with_request_id(
+            node_url, endpoint, request_data, request_id
+        )
+        async for chunk in gen:
+            yield chunk
 
     # -- Unified dispatch --
 

@@ -15,24 +15,25 @@ Examples:
     python -m dlrouter --server_port 9000 \
         --routing_strategy round_robin
 
-    # With PD disaggregation
-    python -m dlrouter --serving_strategy distserve
+    # With LMDeploy PD disaggregation
+    python -m dlrouter --serving_strategy distserve --backend lmdeploy \
+        --migration_protocol RDMA --link_type RoCE
+
+    # With vLLM PD disaggregation
+    python -m dlrouter --serving_strategy distserve --backend vllm \
+        --zmq_port 30001 --models "model-a,model-b"
 """
 
+import argparse
 import os
 import sys
-from typing import Literal, Optional, Union
+from typing import Any
 
-import fire
 import uvicorn
 
 from dlrouter.api.app import create_app
-from dlrouter.config import (
-    BackendConfig,
-    LMDeployPDConfig,
-    RouterConfig,
-    SSLConfig,
-)
+from dlrouter.backends.factory import get_backend_class
+from dlrouter.config import RouterConfig, SSLConfig
 from dlrouter.constants import (
     BackendType,
     RoutingStrategy,
@@ -44,98 +45,219 @@ from dlrouter.logger import get_logger
 logger = get_logger('dlrouter')
 
 
+def build_base_parser() -> argparse.ArgumentParser:
+    """Build base argument parser with common options."""
+    parser = argparse.ArgumentParser(
+        description='DLRouter - High-performance LLM inference router',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        add_help=False,  # Disable auto help to handle it manually
+    )
+
+    # Help option (manual)
+    parser.add_argument(
+        '-h', '--help',
+        action='store_true',
+        help='Show this help message and exit',
+    )
+
+    # Server options
+    parser.add_argument(
+        '--server_name',
+        default='0.0.0.0',
+        help='Bind address (default: 0.0.0.0)',
+    )
+    parser.add_argument(
+        '--server_port',
+        type=int,
+        default=8000,
+        help='Listen port (default: 8000)',
+    )
+
+    # Backend and strategy
+    parser.add_argument(
+        '--backend',
+        choices=[b.value for b in BackendType],
+        default='lmdeploy',
+        help='Inference backend type (default: lmdeploy)',
+    )
+    parser.add_argument(
+        '--routing_strategy',
+        choices=[r.value for r in RoutingStrategy],
+        default='min_expected_latency',
+        help='Request routing strategy (default: min_expected_latency)',
+    )
+    parser.add_argument(
+        '--serving_strategy',
+        choices=[s.value for s in ServingStrategy],
+        default='hybrid',
+        help='Serving mode (default: hybrid)',
+    )
+
+    # Auth and SSL
+    parser.add_argument(
+        '--api_keys',
+        default=None,
+        help='Comma-separated API keys for authentication',
+    )
+    parser.add_argument(
+        '--ssl',
+        action='store_true',
+        help='Enable SSL (requires SSL_KEYFILE and SSL_CERTFILE env vars)',
+    )
+
+    # Logging and misc
+    parser.add_argument(
+        '--log_level',
+        default='INFO',
+        help='Logging level (default: INFO)',
+    )
+    parser.add_argument(
+        '--disable_cache_status',
+        action='store_true',
+        help='Disable config caching',
+    )
+    parser.add_argument(
+        '--config_path',
+        default=None,
+        help='Path to config persistence file',
+    )
+
+    # Multi-process
+    parser.add_argument(
+        '--workers',
+        type=int,
+        default=1,
+        help='Number of worker processes (default: 1, use >1 for gunicorn)',
+    )
+
+    return parser
+
+
+def add_backend_args(
+    parser: argparse.ArgumentParser,
+    backend_type: str,
+) -> None:
+    """Dynamically add backend-specific arguments.
+
+    Args:
+        parser: The argument parser to add args to.
+        backend_type: Backend type string (e.g., 'lmdeploy', 'vllm').
+    """
+    try:
+        backend_cls = get_backend_class(BackendType(backend_type))
+    except ValueError:
+        return  # Unknown backend, skip
+
+    backend_group = parser.add_argument_group(
+        f'{backend_type.upper()} options',
+    )
+
+    for arg in backend_cls.get_cli_args():
+        kwargs: dict[str, Any] = {
+            'default': arg.default,
+            'help': arg.help,
+        }
+
+        if arg.type == bool:
+            # Boolean args use store_true
+            if arg.default is False:
+                kwargs['action'] = 'store_true'
+                kwargs.pop('default', None)
+            else:
+                # For default=True, use --no-xxx to disable
+                backend_group.add_argument(
+                    f'--no_{arg.name}',
+                    dest=arg.name,
+                    action='store_false',
+                    help=f'Disable {arg.name}',
+                )
+                continue
+        else:
+            kwargs['type'] = arg.type
+            if arg.choices:
+                kwargs['choices'] = arg.choices
+
+        backend_group.add_argument(f'--{arg.name}', **kwargs)
+
+
+def extract_backend_config(
+    args: argparse.Namespace,
+    backend_type: str,
+) -> dict[str, Any]:
+    """Extract backend-specific config from parsed args.
+
+    Args:
+        args: Parsed argument namespace.
+        backend_type: Backend type string.
+
+    Returns:
+        Dict of backend-specific configuration.
+    """
+    try:
+        backend_cls = get_backend_class(BackendType(backend_type))
+    except ValueError:
+        return {}
+
+    backend_arg_names = [a.name for a in backend_cls.get_cli_args()]
+    return {
+        k: getattr(args, k)
+        for k in backend_arg_names
+        if hasattr(args, k)
+    }
+
+
 def serve(
-    server_name: str = '0.0.0.0',
-    server_port: int = 8000,
-    backend: Literal['lmdeploy', 'vllm'] = 'lmdeploy',
-    routing_strategy: Literal[
-        'round_robin',
-        'random',
-        'consistent_hash',
-        'min_expected_latency',
-        'min_observed_latency',
-    ] = 'min_expected_latency',
-    serving_strategy: Literal['hybrid', 'distserve'] = 'hybrid',
-    api_keys: Optional[Union[list[str], str]] = None,
-    ssl: bool = False,
-    log_level: str = 'INFO',
-    disable_cache_status: bool = False,
-    config_path: Optional[str] = None,
-    migration_protocol: str = 'RDMA',
-    link_type: Literal['RoCE', 'IB'] = 'RoCE',
-    with_gdr: bool = True,
-    dummy_prefill: bool = False,
-    workers: int = 1,
-):
+    args: argparse.Namespace,
+    backend_config: dict[str, Any],
+) -> None:
     """Launch the DLRouter proxy server.
 
     Args:
-        server_name: Bind address. Default 0.0.0.0.
-        server_port: Listen port. Default 8000.
-        backend: Inference backend type.
-        routing_strategy: Request routing strategy.
-        serving_strategy: Serving mode.
-        api_keys: Optional API keys (comma-separated
-            string or list).
-        ssl: Enable SSL (requires SSL_KEYFILE and
-            SSL_CERTFILE env vars).
-        log_level: Logging level.
-        disable_cache_status: Disable config caching.
-        config_path: Path to config persistence file.
-        migration_protocol: PD migration protocol.
-        link_type: RDMA link type.
-        with_gdr: Enable GPU Direct RDMA.
-        dummy_prefill: Use dummy prefill for testing.
-        workers: Number of worker processes. Use >1 for
-            multi-process mode (requires gunicorn).
+        args: Parsed CLI arguments.
+        backend_config: Backend-specific configuration dict.
     """
     # Parse api_keys
-    if isinstance(api_keys, str):
-        api_keys = api_keys.split(',')
+    api_keys = None
+    if args.api_keys:
+        api_keys = [k.strip() for k in args.api_keys.split(',')]
 
     # Build config
     config = RouterConfig(
-        server_name=server_name,
-        server_port=server_port,
-        routing_strategy=RoutingStrategy(routing_strategy),
-        serving_strategy=ServingStrategy(serving_strategy),
-        backend=BackendConfig(type=BackendType(backend)),
-        pd_config=LMDeployPDConfig(
-            migration_protocol=migration_protocol,
-            link_type=link_type,
-            with_gdr=with_gdr,
-            dummy_prefill=dummy_prefill,
-        ),
-        ssl=SSLConfig(enabled=ssl),
+        server_name=args.server_name,
+        server_port=args.server_port,
+        routing_strategy=RoutingStrategy(args.routing_strategy),
+        serving_strategy=ServingStrategy(args.serving_strategy),
+        backend_type=BackendType(args.backend),
+        backend_config=backend_config,
+        ssl=SSLConfig(enabled=args.ssl),
         api_keys=api_keys,
-        log_level=log_level,
-        cache_status=not disable_cache_status,
-        config_path=config_path,
+        log_level=args.log_level,
+        cache_status=not args.disable_cache_status,
+        config_path=args.config_path,
     )
 
     # Set log level
-    logger.setLevel(log_level.upper())
+    logger.setLevel(args.log_level.upper())
 
     # Multi-process mode with Gunicorn
-    if workers > 1:
+    if args.workers > 1:
         _run_with_gunicorn(
-            server_name=server_name,
-            server_port=server_port,
-            workers=workers,
-            log_level=log_level,
-            ssl=ssl,
+            server_name=args.server_name,
+            server_port=args.server_port,
+            workers=args.workers,
+            log_level=args.log_level,
+            ssl=args.ssl,
             config=config,
         )
         return
 
     # Single-process mode with Uvicorn
-    # Create app
     app = create_app(config)
 
     # SSL
     ssl_keyfile = None
     ssl_certfile = None
-    if ssl:
+    if args.ssl:
         ssl_keyfile = os.environ.get('SSL_KEYFILE')
         ssl_certfile = os.environ.get('SSL_CERTFILE')
 
@@ -143,8 +265,8 @@ def serve(
     uv_log = os.getenv('UVICORN_LOG_LEVEL', 'info').lower()
     uvicorn.run(
         app=app,
-        host=server_name,
-        port=server_port,
+        host=args.server_name,
+        port=args.server_port,
         log_level=uv_log,
         ssl_keyfile=ssl_keyfile,
         ssl_certfile=ssl_certfile,
@@ -170,7 +292,8 @@ def _run_with_gunicorn(
         import gunicorn.app.base
     except ImportError:
         print(
-            'Error: gunicorn is required for multi-process mode.\nInstall it with: pip install gunicorn',
+            'Error: gunicorn is required for multi-process mode.\n'
+            'Install it with: pip install gunicorn',
             file=sys.stderr,
         )
         sys.exit(1)
@@ -226,7 +349,11 @@ def _run_with_gunicorn(
     # Create app factory that reads config from environment
     def app_factory():
         config_json = os.environ.get('DLROUTER_CONFIG_JSON')
-        cfg = RouterConfig.model_validate_json(config_json) if config_json else RouterConfig()
+        cfg = (
+            RouterConfig.model_validate_json(config_json)
+            if config_json
+            else RouterConfig()
+        )
         return create_app(cfg)
 
     # Run Gunicorn
@@ -234,8 +361,42 @@ def _run_with_gunicorn(
 
 
 def main():
-    """CLI entry point."""
-    fire.Fire(serve)
+    """CLI entry point with two-phase argument parsing.
+
+    Phase 1: Parse base arguments to determine backend type.
+    Phase 2: Add backend-specific arguments and re-parse.
+    """
+    import sys
+
+    # Phase 1: Parse known args to get backend type
+    parser = build_base_parser()
+    args, remaining = parser.parse_known_args()
+
+    # Phase 2: Add backend-specific args
+    add_backend_args(parser, args.backend)
+
+    # If help was requested, show help now (with backend args)
+    if args.help:
+        parser.print_help()
+        sys.exit(0)
+
+    # Full parse
+    args = parser.parse_args()
+
+    # Extract backend config
+    backend_config = extract_backend_config(args, args.backend)
+
+    # Log startup info
+    logger.info(
+        f'Starting DLRouter: backend={args.backend}, '
+        f'serving_strategy={args.serving_strategy}, '
+        f'routing_strategy={args.routing_strategy}',
+    )
+    if backend_config:
+        logger.info(f'Backend config: {backend_config}')
+
+    # Launch server
+    serve(args, backend_config)
 
 
 if __name__ == '__main__':

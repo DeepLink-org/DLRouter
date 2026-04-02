@@ -2,9 +2,29 @@
 
 from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator
+from dataclasses import dataclass, field
 from typing import Any, Optional
 
 from dlrouter.models.node import NodeStatus
+
+
+@dataclass
+class CLIArg:
+    """CLI argument definition for backend-specific parameters.
+
+    Attributes:
+        name: Argument name (without -- prefix).
+        type: Python type (str, int, bool, etc.).
+        default: Default value.
+        help: Help text for the argument.
+        choices: Optional list of valid choices.
+    """
+
+    name: str
+    type: type
+    default: Any
+    help: str
+    choices: Optional[list] = field(default=None)
 
 
 class BaseBackend(ABC):
@@ -138,3 +158,51 @@ class BaseBackend(ABC):
         if not status.models:
             status.models = self.fetch_models(node_url)
         return status
+
+    # -- CLI argument registration --
+
+    @classmethod
+    def get_cli_args(cls) -> list[CLIArg]:
+        """Return backend-specific CLI arguments.
+
+        Subclasses should override this to define their
+        configuration parameters.
+
+        Returns:
+            List of CLIArg definitions.
+        """
+        return []
+
+    @classmethod
+    def parse_config(cls, **kwargs) -> dict[str, Any]:
+        """Parse and validate backend-specific config from CLI args.
+
+        Subclasses should override this to construct their
+        configuration object from parsed CLI arguments.
+
+        Args:
+            **kwargs: CLI arguments as keyword arguments.
+
+        Returns:
+            Backend-specific configuration dict or object.
+        """
+        return {}
+
+    def create_service_discovery(
+        self,
+        backend_config: dict[str, Any],
+        node_manager: Any,
+    ) -> Any:
+        """Create service discovery component if needed.
+
+        Backends that require service discovery (e.g., vLLM PD mode)
+        should override this method.
+
+        Args:
+            backend_config: Backend-specific configuration dict.
+            node_manager: The NodeManager instance.
+
+        Returns:
+            Service discovery instance, or None if not needed.
+        """
+        return None

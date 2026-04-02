@@ -12,9 +12,9 @@ from typing import Any, Optional
 
 import aiohttp
 import requests
+from pydantic import BaseModel
 
-from dlrouter.backends.base import BaseBackend
-from dlrouter.config import LMDeployPDConfig
+from dlrouter.backends.base import BaseBackend, CLIArg
 from dlrouter.constants import AIOHTTP_TIMEOUT, HEALTH_CHECK_TIMEOUT
 from dlrouter.logger import get_logger
 
@@ -24,6 +24,19 @@ logger = get_logger('dlrouter.backends.lmdeploy')
 # Default connection pool limits
 DEFAULT_POOL_CONNECTIONS = 100
 DEFAULT_POOL_MAXSIZE = 100
+
+
+class LMDeployPDConfig(BaseModel):
+    """LMDeploy PD disaggregation config.
+
+    This config is used when serving_strategy is DISTSERVE
+    and backend is LMDeploy.
+    """
+
+    migration_protocol: str = 'RDMA'
+    link_type: str = 'RoCE'
+    with_gdr: bool = True
+    dummy_prefill: bool = False
 
 
 class LMDeployBackend(BaseBackend):
@@ -321,3 +334,46 @@ class LMDeployBackend(BaseBackend):
         pool = self._get_pd_pool()
         if pool:
             pool.unshelf_prefill_session((p_url, d_url), session_id)
+
+    # -- CLI argument registration --
+
+    @classmethod
+    def get_cli_args(cls) -> list[CLIArg]:
+        """Return LMDeploy-specific CLI arguments."""
+        return [
+            CLIArg(
+                name='migration_protocol',
+                type=str,
+                default='RDMA',
+                help='PD migration protocol (LMDeploy)',
+            ),
+            CLIArg(
+                name='link_type',
+                type=str,
+                default='RoCE',
+                help='RDMA link type (LMDeploy)',
+                choices=['RoCE', 'IB'],
+            ),
+            CLIArg(
+                name='with_gdr',
+                type=bool,
+                default=True,
+                help='Enable GPU Direct RDMA (LMDeploy)',
+            ),
+            CLIArg(
+                name='dummy_prefill',
+                type=bool,
+                default=False,
+                help='Use dummy prefill for testing (LMDeploy)',
+            ),
+        ]
+
+    @classmethod
+    def parse_config(cls, **kwargs) -> 'LMDeployPDConfig':
+        """Parse LMDeploy-specific config from CLI args."""
+        return LMDeployPDConfig(
+            migration_protocol=kwargs.get('migration_protocol', 'RDMA'),
+            link_type=kwargs.get('link_type', 'RoCE'),
+            with_gdr=kwargs.get('with_gdr', True),
+            dummy_prefill=kwargs.get('dummy_prefill', False),
+        )

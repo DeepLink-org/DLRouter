@@ -1,17 +1,19 @@
 """vLLM backend adapter.
 
 Supports standard OpenAI-compatible API forwarding
-for vLLM inference engine.
+for vLLM inference engine, including PD disaggregation mode.
 """
 
 import asyncio
+import os
 from collections.abc import AsyncIterator
 from typing import Any, Optional
 
 import aiohttp
 import requests
+from pydantic import BaseModel, Field
 
-from dlrouter.backends.base import BaseBackend
+from dlrouter.backends.base import BaseBackend, CLIArg
 from dlrouter.constants import AIOHTTP_TIMEOUT, HEALTH_CHECK_TIMEOUT
 from dlrouter.logger import get_logger
 
@@ -23,11 +25,25 @@ DEFAULT_POOL_CONNECTIONS = 100
 DEFAULT_POOL_MAXSIZE = 100
 
 
+class VLLMPDConfig(BaseModel):
+    """vLLM PD disaggregation config.
+
+    This config is used when serving_strategy is DISTSERVE
+    and backend is vLLM. vLLM PD mode uses ZMQ for service
+    discovery and request_id encoding for KV cache transfer.
+    """
+
+    zmq_host: str = '0.0.0.0'
+    zmq_port: int = 30001
+    ping_timeout_seconds: int = 5
+    models: list[str] = Field(default_factory=list)
+
+
 class VLLMBackend(BaseBackend):
     """Backend adapter for vLLM inference engine.
 
     Handles standard OpenAI-compatible API forwarding.
-    vLLM does not support PD disaggregation.
+    Also supports vLLM PD disaggregation mode via request_id encoding.
 
     Uses a persistent aiohttp.ClientSession with connection pooling
     for better performance under high concurrency.
@@ -167,3 +183,151 @@ class VLLMBackend(BaseBackend):
 
     def deregister_node(self, node_url: str) -> None:
         """No-op for vLLM (no PD connection pool)."""
+
+    # -- vLLM PD Disaggregation support --
+
+    async def forward_with_request_id(
+        self,
+        node_url: str,
+        endpoint: str,
+        request_data: dict[str, Any],
+        request_id: str,
+    ) -> Any:
+        """Forward request to vLLM node with X-Request-Id header.
+
+        Used in vLLM PD mode where the request_id encodes
+        the prefill and decode ZMQ addresses.
+
+        Args:
+            node_url: Target vLLM node URL.
+            endpoint: API endpoint path.
+            request_data: Request payload.
+            request_id: Encoded request ID with PD addresses.
+
+        Returns:
+            Response text.
+        """
+        session = await self._get_session()
+        url = node_url + endpoint
+        headers = {
+            'Authorization': f"Bearer {os.environ.get('OPENAI_API_KEY', '')}",
+            'X-Request-Id': request_id,
+        }
+        try:
+            async with session.post(
+                url,
+                json=request_data,
+                headers=headers,
+                timeout=self._timeout,
+            ) as resp:
+                return await resp.text()
+        except Exception as e:
+            logger.error(f'Forward with request_id error: {e}')
+            raise
+
+    async def stream_forward_with_request_id(
+        self,
+        node_url: str,
+        endpoint: str,
+        request_data: dict[str, Any],
+        request_id: str,
+    ) -> AsyncIterator[bytes]:
+        """Stream-forward request to vLLM node with X-Request-Id header.
+
+        Args:
+            node_url: Target vLLM node URL.
+            endpoint: API endpoint path.
+            request_data: Request payload.
+            request_id: Encoded request ID with PD addresses.
+
+        Yields:
+            Response chunks.
+        """
+        session = await self._get_session()
+        url = node_url + endpoint
+        headers = {
+            'Authorization': f"Bearer {os.environ.get('OPENAI_API_KEY', '')}",
+            'X-Request-Id': request_id,
+        }
+        try:
+            async with session.post(
+                url,
+                json=request_data,
+                headers=headers,
+                timeout=self._timeout,
+            ) as resp:
+                async for chunk in resp.content.iter_chunked(1024):
+                    yield chunk
+        except Exception as e:
+            logger.error(f'Stream with request_id error: {e}')
+            raise
+
+    # -- CLI argument registration --
+
+    @classmethod
+    def get_cli_args(cls) -> list[CLIArg]:
+        """Return vLLM-specific CLI arguments."""
+        return [
+            CLIArg(
+                name='zmq_host',
+                type=str,
+                default='0.0.0.0',
+                help='ZMQ service discovery bind host (vLLM PD)',
+            ),
+            CLIArg(
+                name='zmq_port',
+                type=int,
+                default=30001,
+                help='ZMQ service discovery port (vLLM PD)',
+            ),
+            CLIArg(
+                name='zmq_ping_timeout',
+                type=int,
+                default=5,
+                help='ZMQ ping timeout in seconds (vLLM PD)',
+            ),
+            CLIArg(
+                name='models',
+                type=str,
+                default=None,
+                help='Comma-separated model names for vLLM PD mode',
+            ),
+        ]
+
+    @classmethod
+    def parse_config(cls, **kwargs) -> 'VLLMPDConfig':
+        """Parse vLLM-specific config from CLI args."""
+        models = []
+        if kwargs.get('models'):
+            models = [m.strip() for m in kwargs['models'].split(',')]
+        return VLLMPDConfig(
+            zmq_host=kwargs.get('zmq_host', '0.0.0.0'),
+            zmq_port=kwargs.get('zmq_port', 30001),
+            ping_timeout_seconds=kwargs.get('zmq_ping_timeout', 5),
+            models=models,
+        )
+
+    def create_service_discovery(
+        self,
+        backend_config: dict[str, Any],
+        node_manager: Any,
+    ) -> Any:
+        """Create ZMQ service discovery for vLLM PD mode.
+
+        Args:
+            backend_config: Backend-specific configuration dict.
+            node_manager: The NodeManager instance.
+
+        Returns:
+            ZMQServiceDiscovery instance.
+        """
+        from dlrouter.core.zmq_discovery import ZMQServiceDiscovery
+
+        config = self.parse_config(**backend_config)
+        return ZMQServiceDiscovery(
+            host=config.zmq_host,
+            port=config.zmq_port,
+            ping_timeout_seconds=config.ping_timeout_seconds,
+            node_manager=node_manager,
+            models=config.models,
+        )

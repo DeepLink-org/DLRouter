@@ -1,5 +1,7 @@
 """FastAPI application factory."""
 
+from typing import Any, Optional
+
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
@@ -14,6 +16,7 @@ from dlrouter.api.routes import (
 )
 from dlrouter.backends.factory import create_backend
 from dlrouter.config import RouterConfig
+from dlrouter.constants import ServingStrategy
 from dlrouter.core.health_check import HealthChecker
 from dlrouter.core.node_manager import NodeManager
 from dlrouter.core.proxy_engine import ProxyEngine
@@ -79,7 +82,7 @@ def create_app(
         set_api_keys(config.api_keys)
 
     # Backend
-    backend = create_backend(config.backend, config.pd_config)
+    backend = create_backend(config.backend_type, config.backend_config)
 
     # Node manager
     node_manager = NodeManager(
@@ -90,8 +93,16 @@ def create_app(
         cache_status=config.cache_status,
     )
 
+    # Service discovery (backend-specific, e.g., ZMQ for vLLM PD mode)
+    service_discovery: Optional[Any] = None
+    if config.serving_strategy == ServingStrategy.DISTSERVE:
+        service_discovery = backend.create_service_discovery(
+            config.backend_config,
+            node_manager,
+        )
+
     # Proxy engine
-    proxy_engine = ProxyEngine(node_manager)
+    proxy_engine = ProxyEngine(node_manager, service_discovery)
 
     # Inject dependencies into routes
     models.set_node_manager(node_manager)
@@ -111,11 +122,17 @@ def create_app(
     @app.on_event('startup')
     async def on_startup():
         health_checker.start()
+        # Start service discovery if enabled
+        if service_discovery:
+            service_discovery.start()
         logger.info('DLRouter started.')
 
     @app.on_event('shutdown')
     async def on_shutdown():
         health_checker.stop()
+        # Stop service discovery if enabled
+        if service_discovery:
+            service_discovery.stop()
         # Close backend connection pool
         await backend.close()
         logger.info('DLRouter stopped.')
@@ -124,6 +141,7 @@ def create_app(
     app.state.node_manager = node_manager
     app.state.proxy_engine = proxy_engine
     app.state.health_checker = health_checker
+    app.state.service_discovery = service_discovery
     app.state.config = config
 
     return app
