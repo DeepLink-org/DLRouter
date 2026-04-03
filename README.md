@@ -11,6 +11,7 @@ A high-performance router / load balancer for large language model (LLM) inferen
   - `consistent_hash` — Route requests with the same key (e.g. user id) to the same node.
   - `min_expected_latency` — Pick the node with the lowest estimated latency (`unfinished / speed`).
   - `min_observed_latency` — Pick the node with the lowest measured average latency.
+  - `prefix_cache` — Prefix-aware routing that routes requests with shared prefixes to the same node to maximize KV cache reuse.
 - **Multi-Backend Architecture** — Pluggable backend adapters via the `BaseBackend` interface. Currently supported:
   - **LMDeploy** (including PD disaggregation / DistServe)
   - **vLLM** (standard OpenAI-compatible API forwarding)
@@ -55,6 +56,7 @@ DLRouter/
 │       ├── random_strategy.py
 │       ├── consistent_hash.py
 │       ├── load_aware.py      # min_expected / min_observed latency
+│       ├── prefix_cache.py    # Prefix cache aware routing
 │       └── factory.py         # Strategy factory
 ├── tests/
 │   ├── backends/
@@ -171,6 +173,7 @@ curl -X POST http://localhost:8000/v1/chat/completions \
 | `consistent_hash` | Hash-based routing that maps a request key (e.g. `user` field) to a fixed node. Useful for session affinity or cache locality. |
 | `min_expected_latency` | Select the node with the lowest estimated latency: `unfinished_requests / speed`. |
 | `min_observed_latency` | Select the node with the lowest average latency measured from recent requests. |
+| `prefix_cache` | Routes requests with shared prompt prefixes to the same backend node to maximize KV cache utilization. Uses a Trie data structure for efficient prefix matching with load balancing fallback. |
 
 ## Environment Variables
 

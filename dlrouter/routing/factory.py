@@ -9,6 +9,7 @@ from dlrouter.routing.load_aware import (
     MinExpectedLatencyStrategy,
     MinObservedLatencyStrategy,
 )
+from dlrouter.routing.prefix_cache import PrefixCacheStrategy
 from dlrouter.routing.random_strategy import RandomStrategy
 from dlrouter.routing.round_robin import RoundRobinStrategy
 
@@ -30,9 +31,10 @@ def create_routing_strategy(
     mapping = {
         RoutingStrategy.ROUND_ROBIN: RoundRobinStrategy,
         RoutingStrategy.RANDOM: RandomStrategy,
-        RoutingStrategy.CONSISTENT_HASH: (ConsistentHashStrategy),
-        RoutingStrategy.MIN_EXPECTED_LATENCY: (MinExpectedLatencyStrategy),
-        RoutingStrategy.MIN_OBSERVED_LATENCY: (MinObservedLatencyStrategy),
+        RoutingStrategy.CONSISTENT_HASH: ConsistentHashStrategy,
+        RoutingStrategy.MIN_EXPECTED_LATENCY: MinExpectedLatencyStrategy,
+        RoutingStrategy.MIN_OBSERVED_LATENCY: MinObservedLatencyStrategy,
+        RoutingStrategy.PREFIX_CACHE: PrefixCacheStrategy,
     }
     cls = mapping.get(strategy)
     if cls is None:

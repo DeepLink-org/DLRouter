@@ -28,6 +28,7 @@ class RoutingStrategy(str, enum.Enum):
     CONSISTENT_HASH = 'consistent_hash'
     MIN_EXPECTED_LATENCY = 'min_expected_latency'
     MIN_OBSERVED_LATENCY = 'min_observed_latency'
+    PREFIX_CACHE = 'prefix_cache'
 
 
 class BackendType(str, enum.Enum):

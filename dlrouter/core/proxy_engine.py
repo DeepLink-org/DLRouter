@@ -239,18 +239,73 @@ class ProxyEngine:
         raw_request: Optional[Request],
         body: Union['ChatCompletionRequest', 'CompletionRequest', None],
     ) -> Optional[str]:
-        """Extract request key only for consistent hash strategy.
+        """Extract request key for routing strategies that need it.
+
+        For CONSISTENT_HASH: extracts session/user keys from headers/body.
+        For PREFIX_CACHE: extracts the prompt text for prefix matching.
 
         Args:
             raw_request: The raw HTTP request (for headers).
             body: The parsed request body.
 
         Returns:
-            Request key if using consistent hash, None otherwise.
+            Request key/prompt if using a strategy that requires it, None otherwise.
         """
-        if self.manager.routing_strategy != RoutingStrategy.CONSISTENT_HASH:
+        strategy = self.manager.routing_strategy
+
+        if strategy == RoutingStrategy.CONSISTENT_HASH:
+            return extract_request_key(raw_request, body)
+
+        if strategy == RoutingStrategy.PREFIX_CACHE:
+            return self._extract_prompt_for_prefix_cache(body)
+
+        return None
+
+    def _extract_prompt_for_prefix_cache(
+        self,
+        body: Union['ChatCompletionRequest', 'CompletionRequest', None],
+    ) -> Optional[str]:
+        """Extract prompt text from request body for prefix cache matching.
+
+        Handles both ChatCompletionRequest (messages) and CompletionRequest (prompt).
+
+        Args:
+            body: The parsed request body.
+
+        Returns:
+            The prompt string for prefix matching, or None if not found.
+        """
+        if body is None:
             return None
-        return extract_request_key(raw_request, body)
+
+        # Handle ChatCompletionRequest - extract from messages
+        if hasattr(body, 'messages') and body.messages is not None:
+            messages = body.messages
+            if isinstance(messages, str):
+                return messages
+            if isinstance(messages, list) and len(messages) > 0:
+                # Concatenate all message content to form the prompt
+                parts = []
+                for msg in messages:
+                    if isinstance(msg, dict):
+                        content = msg.get('content', '')
+                        if content:
+                            parts.append(str(content))
+                    elif hasattr(msg, 'content'):
+                        if msg.content:
+                            parts.append(str(msg.content))
+                return '\n'.join(parts) if parts else None
+
+        # Handle CompletionRequest - extract from prompt field
+        if hasattr(body, 'prompt') and body.prompt is not None:
+            prompt = body.prompt
+            if isinstance(prompt, str):
+                return prompt
+            if isinstance(prompt, list) and len(prompt) > 0:
+                # Join list of prompts
+                return '\n'.join(str(p) for p in prompt)
+
+        return None
 
     async def dispatch(
         self,

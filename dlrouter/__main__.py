@@ -50,6 +50,7 @@ def serve(
         'consistent_hash',
         'min_expected_latency',
         'min_observed_latency',
+        'prefix_cache',
     ] = 'min_expected_latency',
     serving_strategy: Literal['hybrid', 'distserve'] = 'hybrid',
     api_keys: Optional[Union[list[str], str]] = None,

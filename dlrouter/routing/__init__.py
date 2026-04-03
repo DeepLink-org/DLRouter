@@ -9,6 +9,7 @@ from dlrouter.routing.load_aware import (
     MinExpectedLatencyStrategy,
     MinObservedLatencyStrategy,
 )
+from dlrouter.routing.prefix_cache import PrefixCacheStrategy
 from dlrouter.routing.random_strategy import RandomStrategy
 from dlrouter.routing.round_robin import RoundRobinStrategy
 
@@ -18,6 +19,7 @@ __all__ = [
     'ConsistentHashStrategy',
     'MinExpectedLatencyStrategy',
     'MinObservedLatencyStrategy',
+    'PrefixCacheStrategy',
     'RandomStrategy',
     'RoundRobinStrategy',
     'create_routing_strategy',
