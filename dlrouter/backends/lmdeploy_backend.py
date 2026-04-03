@@ -4,6 +4,7 @@ Supports both Hybrid and DistServe (PD disaggregation)
 serving strategies.
 """
 
+import asyncio
 import copy
 import json
 from collections.abc import AsyncIterator
@@ -11,14 +12,31 @@ from typing import Any, Optional
 
 import aiohttp
 import requests
+from pydantic import BaseModel
 
-from dlrouter.backends.base import BaseBackend
-from dlrouter.config import LMDeployPDConfig
+from dlrouter.backends.base import BaseBackend, CLIArg
 from dlrouter.constants import AIOHTTP_TIMEOUT, HEALTH_CHECK_TIMEOUT
 from dlrouter.logger import get_logger
 
 
 logger = get_logger('dlrouter.backends.lmdeploy')
+
+# Default connection pool limits
+DEFAULT_POOL_CONNECTIONS = 100
+DEFAULT_POOL_MAXSIZE = 100
+
+
+class LMDeployPDConfig(BaseModel):
+    """LMDeploy PD disaggregation config.
+
+    This config is used when serving_strategy is DISTSERVE
+    and backend is LMDeploy.
+    """
+
+    migration_protocol: str = 'RDMA'
+    link_type: str = 'RoCE'
+    with_gdr: bool = True
+    dummy_prefill: bool = False
 
 
 class LMDeployBackend(BaseBackend):
@@ -26,15 +44,32 @@ class LMDeployBackend(BaseBackend):
 
     Handles both standard (Hybrid) forwarding and
     PD disaggregation (DistServe) flows.
+
+    Uses a persistent aiohttp.ClientSession with connection pooling
+    for better performance under high concurrency.
     """
 
     def __init__(
         self,
         pd_config: Optional[LMDeployPDConfig] = None,
+        pool_connections: int = DEFAULT_POOL_CONNECTIONS,
+        pool_maxsize: int = DEFAULT_POOL_MAXSIZE,
     ) -> None:
         self.pd_config = pd_config or LMDeployPDConfig()
-        timeout_val = AIOHTTP_TIMEOUT
-        self._timeout = aiohttp.ClientTimeout(total=timeout_val)
+        self._timeout = aiohttp.ClientTimeout(total=AIOHTTP_TIMEOUT)
+        self._health_timeout = aiohttp.ClientTimeout(
+            total=HEALTH_CHECK_TIMEOUT,
+        )
+        # Connection pool settings
+        self._connector_kwargs = {
+            'limit': pool_connections,
+            'limit_per_host': pool_maxsize,
+            'ttl_dns_cache': 300,
+            'enable_cleanup_closed': True,
+        }
+        # Lazy-initialized session (bound to specific event loop)
+        self._session: Optional[aiohttp.ClientSession] = None
+        self._session_lock: Optional[asyncio.Lock] = None
         # PD connection pool (lazy import)
         self._pd_pool = None
 
@@ -48,9 +83,44 @@ class LMDeployBackend(BaseBackend):
 
                 self._pd_pool = PDConnectionPool()
             except ImportError:
-                logger.warning('lmdeploy PD disagg not available. Install lmdeploy for PD support.')
+                logger.warning(
+                    'lmdeploy PD disagg not available. Install lmdeploy for PD support.',
+                )
                 self._pd_pool = None
         return self._pd_pool
+
+    # -- Session management --
+
+    async def _get_session(self) -> aiohttp.ClientSession:
+        """Get or create a persistent aiohttp session.
+
+        Uses double-checked locking for thread-safe lazy initialization.
+        The lock is lazily created to ensure it's bound to the
+        correct event loop.
+        """
+        # Lazily create the lock to ensure it's bound to
+        # the current event loop
+        if self._session_lock is None:
+            self._session_lock = asyncio.Lock()
+
+        if self._session is None or self._session.closed:
+            async with self._session_lock:
+                if self._session is None or self._session.closed:
+                    connector = aiohttp.TCPConnector(**self._connector_kwargs)
+                    self._session = aiohttp.ClientSession(
+                        connector=connector,
+                        timeout=self._timeout,
+                    )
+        return self._session
+
+    async def close(self) -> None:
+        """Close the persistent session.
+
+        Should be called during application shutdown.
+        """
+        if self._session and not self._session.closed:
+            await self._session.close()
+            self._session = None
 
     def deregister_node(self, node_url: str) -> None:
         """Remove node from PD connection pool."""
@@ -68,15 +138,15 @@ class LMDeployBackend(BaseBackend):
         stream: bool = False,
     ) -> Any:
         """Forward request to LMDeploy node."""
+        session = await self._get_session()
+        url = node_url + endpoint
         try:
-            async with aiohttp.ClientSession() as sess:
-                url = node_url + endpoint
-                async with sess.post(
-                    url,
-                    json=request_data,
-                    timeout=self._timeout,
-                ) as resp:
-                    return await resp.text()
+            async with session.post(
+                url,
+                json=request_data,
+                timeout=self._timeout,
+            ) as resp:
+                return await resp.text()
         except Exception as e:
             logger.error(f'Forward error: {e}')
             raise
@@ -88,17 +158,17 @@ class LMDeployBackend(BaseBackend):
         request_data: dict[str, Any],
     ) -> AsyncIterator[bytes]:
         """Stream-forward request to LMDeploy node."""
+        session = await self._get_session()
+        url = node_url + endpoint
         try:
-            async with aiohttp.ClientSession() as sess:
-                url = node_url + endpoint
-                async with sess.post(
-                    url,
-                    json=request_data,
-                    timeout=self._timeout,
-                ) as resp:
-                    async for line in resp.content:
-                        if line.strip():
-                            yield line + b'\n\n'
+            async with session.post(
+                url,
+                json=request_data,
+                timeout=self._timeout,
+            ) as resp:
+                async for line in resp.content:
+                    if line.strip():
+                        yield line + b'\n\n'
         except Exception as e:
             logger.error(f'Stream error: {e}')
             raise
@@ -118,11 +188,20 @@ class LMDeployBackend(BaseBackend):
             return []
 
     async def check_health(self, node_url: str) -> bool:
-        """Check LMDeploy node health via async request."""
+        """Check LMDeploy node health via async request.
+
+        Uses a temporary session to avoid event loop binding issues
+        when called from different threads (e.g., health check thread).
+        """
+        url = f'{node_url}/health'
         try:
-            url = f'{node_url}/health'
-            timeout = aiohttp.ClientTimeout(total=HEALTH_CHECK_TIMEOUT)
-            async with aiohttp.ClientSession() as sess, sess.get(url, timeout=timeout) as resp:
+            async with (
+                aiohttp.ClientSession() as session,
+                session.get(
+                    url,
+                    timeout=self._health_timeout,
+                ) as resp,
+            ):
                 return resp.status == 200
         except Exception as e:
             logger.error(f'Failed to check health from {node_url}: {e}')
@@ -255,3 +334,46 @@ class LMDeployBackend(BaseBackend):
         pool = self._get_pd_pool()
         if pool:
             pool.unshelf_prefill_session((p_url, d_url), session_id)
+
+    # -- CLI argument registration --
+
+    @classmethod
+    def get_cli_args(cls) -> list[CLIArg]:
+        """Return LMDeploy-specific CLI arguments."""
+        return [
+            CLIArg(
+                name='migration_protocol',
+                type=str,
+                default='RDMA',
+                help='PD migration protocol (LMDeploy)',
+            ),
+            CLIArg(
+                name='link_type',
+                type=str,
+                default='RoCE',
+                help='RDMA link type (LMDeploy)',
+                choices=['RoCE', 'IB'],
+            ),
+            CLIArg(
+                name='with_gdr',
+                type=bool,
+                default=True,
+                help='Enable GPU Direct RDMA (LMDeploy)',
+            ),
+            CLIArg(
+                name='dummy_prefill',
+                type=bool,
+                default=False,
+                help='Use dummy prefill for testing (LMDeploy)',
+            ),
+        ]
+
+    @classmethod
+    def parse_config(cls, **kwargs) -> 'LMDeployPDConfig':
+        """Parse LMDeploy-specific config from CLI args."""
+        return LMDeployPDConfig(
+            migration_protocol=kwargs.get('migration_protocol', 'RDMA'),
+            link_type=kwargs.get('link_type', 'RoCE'),
+            with_gdr=kwargs.get('with_gdr', True),
+            dummy_prefill=kwargs.get('dummy_prefill', False),
+        )

@@ -1,6 +1,6 @@
 """Configuration models for DLRouter."""
 
-from typing import Optional
+from typing import Any, Optional
 
 from pydantic import BaseModel, Field
 
@@ -9,22 +9,6 @@ from dlrouter.constants import (
     RoutingStrategy,
     ServingStrategy,
 )
-
-
-class BackendConfig(BaseModel):
-    """Configuration for an inference backend."""
-
-    type: BackendType = BackendType.LMDEPLOY
-    extra: dict = Field(default_factory=dict)
-
-
-class LMDeployPDConfig(BaseModel):
-    """LMDeploy PD disaggregation config."""
-
-    migration_protocol: str = 'RDMA'
-    link_type: str = 'RoCE'
-    with_gdr: bool = True
-    dummy_prefill: bool = False
 
 
 class SSLConfig(BaseModel):
@@ -36,14 +20,18 @@ class SSLConfig(BaseModel):
 
 
 class RouterConfig(BaseModel):
-    """Top-level router configuration."""
+    """Top-level router configuration.
+
+    Backend-specific configurations are stored in backend_config
+    and parsed by the corresponding backend class.
+    """
 
     server_name: str = '0.0.0.0'
     server_port: int = 8000
     routing_strategy: RoutingStrategy = RoutingStrategy.MIN_EXPECTED_LATENCY
     serving_strategy: ServingStrategy = ServingStrategy.HYBRID
-    backend: BackendConfig = Field(default_factory=BackendConfig)
-    pd_config: LMDeployPDConfig = Field(default_factory=LMDeployPDConfig)
+    backend_type: BackendType = BackendType.LMDEPLOY
+    backend_config: dict[str, Any] = Field(default_factory=dict)
     ssl: SSLConfig = Field(default_factory=SSLConfig)
     api_keys: Optional[list[str]] = None
     log_level: str = 'INFO'

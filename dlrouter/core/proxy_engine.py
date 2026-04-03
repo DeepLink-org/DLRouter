@@ -1,11 +1,11 @@
 """Proxy engine - orchestrates request forwarding.
 
-Handles both Hybrid (standard proxy) and DistServe
-(PD disaggregation) flows.
+Handles Hybrid (standard proxy) and DistServe (PD disaggregation) flows.
+Backend-specific PD logic is delegated to the backend's handle_pd_request().
 """
 
 import json
-from typing import TYPE_CHECKING, Any, Optional, Union
+from typing import Any, Optional, Union
 
 from fastapi import BackgroundTasks
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -20,14 +20,11 @@ from dlrouter.constants import (
 )
 from dlrouter.core.node_manager import NodeManager
 from dlrouter.logger import get_logger
+from dlrouter.models.protocol import (
+    ChatCompletionRequest,
+    CompletionRequest,
+)
 from dlrouter.utils.request_key import extract_request_key
-
-
-if TYPE_CHECKING:
-    from dlrouter.models.protocol import (
-        ChatCompletionRequest,
-        CompletionRequest,
-    )
 
 
 logger = get_logger('dlrouter.proxy_engine')
@@ -40,8 +37,13 @@ class ProxyEngine:
     backend adapter for actual request forwarding.
     """
 
-    def __init__(self, node_manager: NodeManager) -> None:
+    def __init__(
+        self,
+        node_manager: NodeManager,
+        service_discovery: Optional[Any] = None,
+    ) -> None:
         self.manager = node_manager
+        self._service_discovery = service_discovery
 
     @property
     def backend(self):
@@ -149,6 +151,41 @@ class ProxyEngine:
     ):
         """Handle request in DistServe PD mode.
 
+        Delegates to backend.handle_pd_request() if service discovery is available,
+        otherwise falls back to LMDeploy PD logic.
+
+        Returns:
+            StreamingResponse or JSONResponse.
+        """
+        # If backend has service discovery, delegate to backend's PD handler
+        if self._service_discovery is not None:
+            return await self.backend.handle_pd_request(
+                request_data,
+                model_name,
+                endpoint,
+                stream,
+                self._service_discovery,
+            )
+
+        # Otherwise use LMDeploy PD logic
+        return await self.handle_lmdeploy_pd(
+            request_data,
+            model_name,
+            endpoint,
+            stream,
+            request_key,
+        )
+
+    async def handle_lmdeploy_pd(
+        self,
+        request_data: dict[str, Any],
+        model_name: str,
+        endpoint: str,
+        stream: bool = False,
+        request_key: Optional[str] = None,
+    ):
+        """Handle request in LMDeploy PD mode.
+
         1. Send prefill request to P node
         2. Establish PD connection if needed
         3. Send decode request to D node with
@@ -237,7 +274,7 @@ class ProxyEngine:
     def _extract_request_key_if_needed(
         self,
         raw_request: Optional[Request],
-        body: Union['ChatCompletionRequest', 'CompletionRequest', None],
+        body: Union[ChatCompletionRequest, CompletionRequest, None],
     ) -> Optional[str]:
         """Extract request key for routing strategies that need it.
 
@@ -314,7 +351,7 @@ class ProxyEngine:
         endpoint: str,
         stream: bool = False,
         raw_request: Optional[Request] = None,
-        body: Union['ChatCompletionRequest', 'CompletionRequest', None] = None,
+        body: Union[ChatCompletionRequest, CompletionRequest, None] = None,
     ):
         """Dispatch request based on serving strategy.
 
