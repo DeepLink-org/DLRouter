@@ -13,8 +13,8 @@ A high-performance router / load balancer for large language model (LLM) inferen
   - `min_observed_latency` — Pick the node with the lowest measured average latency.
 - **Multi-Backend Architecture** — Pluggable backend adapters via the `BaseBackend` interface. Currently supported:
   - **LMDeploy** (including PD disaggregation / DistServe)
-  - **vLLM** (standard OpenAI-compatible API forwarding)
-- **PD Disaggregation (DistServe)** — First-class support for LMDeploy's Prefill-Decode separation, with automatic PD connection management and migration request handling.
+  - **vLLM** (standard OpenAI-compatible API forwarding, plus PD disaggregation via ZMQ service discovery)
+- **PD Disaggregation (DistServe)** — First-class support for LMDeploy's and vLLM's Prefill-Decode separation, with automatic PD connection management and migration request handling.
 - **Dynamic Node Management** — Register, remove, and terminate backend nodes at runtime via REST API.
 - **Automatic Health Checks** — Background heartbeat thread removes unhealthy nodes automatically.
 - **API Key Authentication** — Optional Bearer token authentication for all endpoints.
@@ -26,7 +26,7 @@ A high-performance router / load balancer for large language model (LLM) inferen
 DLRouter/
 ├── dlrouter/
 │   ├── __main__.py            # CLI entry point
-│   ├── config.py              # Configuration models (Pydantic)
+│   ├── config.py              # Configuration models (RouterConfig, SSLConfig)
 │   ├── constants.py           # Enums & constants
 │   ├── logger.py              # Logging utilities
 │   ├── api/
@@ -45,7 +45,8 @@ DLRouter/
 │   ├── core/
 │   │   ├── node_manager.py    # Node registry & lifecycle
 │   │   ├── proxy_engine.py    # Request dispatch (Hybrid / DistServe)
-│   │   └── health_check.py    # Background health checker
+│   │   ├── health_check.py    # Background health checker
+│   │   └── zmq_discovery.py   # ZMQ service discovery for vLLM PD
 │   ├── models/
 │   │   ├── node.py            # Node / NodeStatus models
 │   │   └── protocol.py        # OpenAI-compatible request/response models
@@ -59,6 +60,8 @@ DLRouter/
 ├── tests/
 │   ├── backends/
 │   │   └── test_vllm_backend.py   # vLLM backend unit tests
+│   ├── core/
+│   │   └── test_zmq_discovery.py  # ZMQ service discovery tests
 │   ├── routing/
 │   │   └── test_routing.py        # Routing strategy unit tests
 │   └── utils/
@@ -103,9 +106,21 @@ dlrouter
 | `--log_level` | `INFO` | Logging level |
 | `--disable_cache_status` | `False` | Disable node status persistence |
 | `--config_path` | `None` | Custom path for config persistence file |
+| `--workers` | `1` | Number of worker processes |
+
+**Backend-specific options** (shown in `--help` when using that backend):
+
+*LMDeploy options:*
 | `--migration_protocol` | `RDMA` | PD migration protocol |
 | `--link_type` | `RoCE` | RDMA link type (`RoCE` / `IB`) |
+| `--with_gdr` | `True` | Enable GPU Direct RDMA |
 | `--dummy_prefill` | `False` | Use dummy prefill (for testing) |
+
+*vLLM options:*
+| `--zmq_host` | `0.0.0.0` | ZMQ service discovery bind host |
+| `--zmq_port` | `30001` | ZMQ service discovery port |
+| `--zmq_ping_timeout` | `5` | ZMQ instance ping timeout (seconds) |
+| `--models` | `None` | Comma-separated model names (optional, auto-fetched from nodes) |
 
 ### Examples
 
@@ -116,13 +131,16 @@ python -m dlrouter --server_port 9000 --routing_strategy round_robin
 # Consistent hash routing with API key
 python -m dlrouter --routing_strategy consistent_hash --api_keys "sk-abc123,sk-def456"
 
-# PD disaggregation mode (DistServe)
-python -m dlrouter --serving_strategy distserve --link_type RoCE
+# LMDeploy PD disaggregation mode (DistServe)
+python -m dlrouter --serving_strategy distserve --backend lmdeploy --link_type RoCE
 
-# Use vllm as backend
+# vLLM PD disaggregation mode (with ZMQ service discovery)
+python -m dlrouter --serving_strategy distserve --backend vllm --zmq_port 30001
+
+# Use vllm as backend (standard mode)
 python -m dlrouter --backend vllm
 
-# Multi works
+# Multi workers
 python -m dlrouter --workers 4
 ```
 
@@ -234,6 +252,7 @@ Client (OpenAI SDK / curl)
 
 **DistServe (PD Disaggregation) mode:**
 
+*LMDeploy PD:*
 ```
 Client
   │
@@ -245,6 +264,20 @@ DLRouter
   │              KV Cache Migration (RDMA)
   │                    │
   └─ 2. Decode  ──► D Node (Decode engine) ──► Response
+```
+
+*vLLM PD (ZMQ Service Discovery):*
+```
+vLLM P/D Instances ──► ZMQ Register ──► DLRouter
+                                           │
+Client ─────────────────────────────────► DLRouter
+  │                                          │
+  ▼                                          ▼
+Request ────► Prefill (max_tokens=1) ──► P Node
+                  │
+            request_id encoding (P_zmq → D_zmq)
+                  │
+              Decode ──────────────────► D Node ──► Response
 ```
 
 ## License
