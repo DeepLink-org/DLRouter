@@ -26,7 +26,7 @@ A high-performance router / load balancer for large language model (LLM) inferen
 DLRouter/
 ├── dlrouter/
 │   ├── __main__.py            # CLI entry point
-│   ├── config.py              # Configuration models (Pydantic)
+│   ├── config.py              # Configuration models (RouterConfig, SSLConfig)
 │   ├── constants.py           # Enums & constants
 │   ├── logger.py              # Logging utilities
 │   ├── api/
@@ -100,19 +100,27 @@ dlrouter
 | `--server_port` | `8000` | Listen port |
 | `--backend` | `lmdeploy` | Backend type (`lmdeploy` / `vllm`) |
 | `--routing_strategy` | `min_expected_latency` | Routing strategy (see below) |
-│ `--serving_strategy` | `hybrid` | Serving mode (`hybrid` / `distserve`) |
+| `--serving_strategy` | `hybrid` | Serving mode (`hybrid` / `distserve`) |
 | `--api_keys` | `None` | Comma-separated API keys for auth |
 | `--ssl` | `False` | Enable SSL (requires `SSL_KEYFILE` & `SSL_CERTFILE` env vars) |
 | `--log_level` | `INFO` | Logging level |
 | `--disable_cache_status` | `False` | Disable node status persistence |
 | `--config_path` | `None` | Custom path for config persistence file |
-| `--migration_protocol` | `RDMA` | PD migration protocol (LMDeploy) |
-| `--link_type` | `RoCE` | RDMA link type (`RoCE` / `IB`) (LMDeploy) |
-| `--dummy_prefill` | `False` | Use dummy prefill (for testing) (LMDeploy) |
-| `--zmq_host` | `0.0.0.0` | ZMQ service discovery bind host (vLLM PD) |
-| `--zmq_port` | `30001` | ZMQ service discovery port (vLLM PD) |
-| `--zmq_ping_timeout` | `5` | ZMQ instance ping timeout in seconds (vLLM PD) |
-| `--models` | `None` | Comma-separated model names (vLLM PD) |
+| `--workers` | `1` | Number of worker processes |
+
+**Backend-specific options** (shown in `--help` when using that backend):
+
+*LMDeploy options:*
+| `--migration_protocol` | `RDMA` | PD migration protocol |
+| `--link_type` | `RoCE` | RDMA link type (`RoCE` / `IB`) |
+| `--with_gdr` | `True` | Enable GPU Direct RDMA |
+| `--dummy_prefill` | `False` | Use dummy prefill (for testing) |
+
+*vLLM options:*
+| `--zmq_host` | `0.0.0.0` | ZMQ service discovery bind host |
+| `--zmq_port` | `30001` | ZMQ service discovery port |
+| `--zmq_ping_timeout` | `5` | ZMQ instance ping timeout (seconds) |
+| `--models` | `None` | Comma-separated model names (optional, auto-fetched from nodes) |
 
 ### Examples
 
@@ -127,7 +135,7 @@ python -m dlrouter --routing_strategy consistent_hash --api_keys "sk-abc123,sk-d
 python -m dlrouter --serving_strategy distserve --backend lmdeploy --link_type RoCE
 
 # vLLM PD disaggregation mode (with ZMQ service discovery)
-python -m dlrouter --serving_strategy distserve --backend vllm --zmq_port 30001 --models "kimi-k2.5"
+python -m dlrouter --serving_strategy distserve --backend vllm --zmq_port 30001
 
 # Use vllm as backend (standard mode)
 python -m dlrouter --backend vllm
@@ -244,6 +252,7 @@ Client (OpenAI SDK / curl)
 
 **DistServe (PD Disaggregation) mode:**
 
+*LMDeploy PD:*
 ```
 Client
   │
@@ -255,6 +264,20 @@ DLRouter
   │              KV Cache Migration (RDMA)
   │                    │
   └─ 2. Decode  ──► D Node (Decode engine) ──► Response
+```
+
+*vLLM PD (ZMQ Service Discovery):*
+```
+vLLM P/D Instances ──► ZMQ Register ──► DLRouter
+                                           │
+Client ─────────────────────────────────► DLRouter
+  │                                          │
+  ▼                                          ▼
+Request ────► Prefill (max_tokens=1) ──► P Node
+                  │
+            request_id encoding (P_zmq → D_zmq)
+                  │
+              Decode ──────────────────► D Node ──► Response
 ```
 
 ## License

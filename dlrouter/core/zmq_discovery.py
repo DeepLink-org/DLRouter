@@ -9,10 +9,11 @@ Based on the official vLLM disaggregated proxy implementation.
 import socket
 import threading
 import time
-from typing import TYPE_CHECKING, Any, Callable, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
 from dlrouter.constants import EngineRole
 from dlrouter.logger import get_logger
+
 
 if TYPE_CHECKING:
     from dlrouter.core.node_manager import NodeManager
@@ -92,19 +93,13 @@ class ZMQServiceDiscovery:
         try:
             import zmq
         except ImportError:
-            logger.error(
-                'pyzmq is required for ZMQ service discovery. '
-                'Install it with: pip install pyzmq'
-            )
+            logger.error('pyzmq is required for ZMQ service discovery. Install it with: pip install pyzmq')
             raise
 
         try:
             import msgpack  # noqa: F401
         except ImportError:
-            logger.error(
-                'msgpack is required for ZMQ service discovery. '
-                'Install it with: pip install msgpack'
-            )
+            logger.error('msgpack is required for ZMQ service discovery. Install it with: pip install msgpack')
             raise
 
         self._context = zmq.Context()
@@ -118,9 +113,7 @@ class ZMQServiceDiscovery:
             name='zmq-discovery',
         )
         self._listener_thread.start()
-        logger.info(
-            f'ZMQ service discovery started on tcp://{self._host}:{self._port}'
-        )
+        logger.info(f'ZMQ service discovery started on tcp://{self._host}:{self._port}')
 
     def stop(self) -> None:
         """Stop the service discovery listener."""
@@ -172,9 +165,7 @@ class ZMQServiceDiscovery:
             elif instance_type == 'D':
                 self._register_decode(http_address, zmq_address, expiration)
             else:
-                logger.warning(
-                    f'Unknown instance type from {remote_address}: {data}'
-                )
+                logger.warning(f'Unknown instance type from {remote_address}: {data}')
         except Exception as e:
             logger.error(f'Error handling ZMQ message: {e}')
 
@@ -230,11 +221,7 @@ class ZMQServiceDiscovery:
             from dlrouter.models.node import NodeStatus
 
             # Ensure URL has http:// prefix
-            node_url = (
-                http_address
-                if http_address.startswith('http')
-                else f'http://{http_address}'
-            )
+            node_url = http_address if http_address.startswith('http') else f'http://{http_address}'
 
             status = NodeStatus(
                 role=role,
@@ -263,11 +250,7 @@ class ZMQServiceDiscovery:
             # Also remove from node_manager
             if self._node_manager is not None:
                 try:
-                    node_url = (
-                        http_addr
-                        if http_addr.startswith('http')
-                        else f'http://{http_addr}'
-                    )
+                    node_url = http_addr if http_addr.startswith('http') else f'http://{http_addr}'
                     self._node_manager.remove(node_url)
                     logger.info(f'Removed expired instance {node_url} from node_manager')
                 except Exception as e:
@@ -370,10 +353,7 @@ class ZMQServiceDiscovery:
         Returns:
             Encoded request ID string.
         """
-        return (
-            f'___prefill_addr_{prefill_zmq_addr}'
-            f'___decode_addr_{decode_zmq_addr}_{base_id}'
-        )
+        return f'___prefill_addr_{prefill_zmq_addr}___decode_addr_{decode_zmq_addr}_{base_id}'
 
     def get_status(self) -> dict[str, Any]:
         """Get current status of the service discovery.
@@ -385,12 +365,6 @@ class ZMQServiceDiscovery:
             'running': self._running,
             'prefill_count': self.get_prefill_count(),
             'decode_count': self.get_decode_count(),
-            'prefill_instances': [
-                {'http': k, 'zmq': v[0]}
-                for k, v in self.prefill_instances.items()
-            ],
-            'decode_instances': [
-                {'http': k, 'zmq': v[0]}
-                for k, v in self.decode_instances.items()
-            ],
+            'prefill_instances': [{'http': k, 'zmq': v[0]} for k, v in self.prefill_instances.items()],
+            'decode_instances': [{'http': k, 'zmq': v[0]} for k, v in self.decode_instances.items()],
         }

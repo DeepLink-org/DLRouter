@@ -1,6 +1,5 @@
 """Tests for ZMQServiceDiscovery."""
 
-import threading
 import time
 from unittest.mock import MagicMock, patch
 
@@ -268,9 +267,8 @@ class TestStartStop:
     def test_start_requires_zmq(self):
         discovery = ZMQServiceDiscovery()
 
-        with patch.dict('sys.modules', {'zmq': None}):
-            with pytest.raises(ImportError):
-                discovery.start()
+        with patch.dict('sys.modules', {'zmq': None}), pytest.raises(ImportError):
+            discovery.start()
 
     def test_start_requires_msgpack(self):
         mock_zmq = MagicMock()
@@ -283,9 +281,9 @@ class TestStartStop:
         with (
             patch.dict('sys.modules', {'zmq': mock_zmq}),
             patch.dict('sys.modules', {'msgpack': None}),
+            pytest.raises(ImportError),
         ):
-            with pytest.raises(ImportError):
-                discovery.start()
+            discovery.start()
 
     def test_stop_without_start(self):
         discovery = ZMQServiceDiscovery()
@@ -296,8 +294,8 @@ class TestStartStop:
     def test_start_and_stop_with_real_zmq(self):
         """Test start/stop with real zmq if available."""
         try:
-            import zmq
             import msgpack  # noqa: F401
+            import zmq  # noqa: F401
         except ImportError:
             pytest.skip('zmq or msgpack not installed')
 

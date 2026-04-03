@@ -267,9 +267,7 @@ class _AsyncChunks:
     """Async iterable over chunks of bytes, for mocking iter_chunked."""
 
     def __init__(self, body: bytes, chunk_size: int = 1024) -> None:
-        self._chunks = [
-            body[i : i + chunk_size] for i in range(0, len(body), chunk_size)
-        ]
+        self._chunks = [body[i : i + chunk_size] for i in range(0, len(body), chunk_size)]
 
     def __aiter__(self):
         return self._gen()
@@ -327,9 +325,7 @@ class TestForwardWithRequestId:
         assert '___prefill_addr_p' in call_args.kwargs['headers']['X-Request-Id']
 
     async def test_raises_on_error(self):
-        session, _ = _make_session_mock_with_chunks(
-            exception=aiohttp.ClientConnectionError('refused')
-        )
+        session, _ = _make_session_mock_with_chunks(exception=aiohttp.ClientConnectionError('refused'))
         backend = VLLMBackend()
         backend._get_session = AsyncMock(return_value=session)
 
@@ -363,9 +359,7 @@ class TestStreamForwardWithRequestId:
         assert b'data:' in combined
 
     async def test_raises_on_error(self):
-        session, _ = _make_session_mock_with_chunks(
-            exception=aiohttp.ServerConnectionError('server error')
-        )
+        session, _ = _make_session_mock_with_chunks(exception=aiohttp.ServerConnectionError('server error'))
         backend = VLLMBackend()
         backend._get_session = AsyncMock(return_value=session)
 
@@ -425,7 +419,7 @@ class TestCLIArgs:
         args = VLLMBackend.get_cli_args()
         zmq_port_arg = next((a for a in args if a.name == 'zmq_port'), None)
         assert zmq_port_arg is not None
-        assert zmq_port_arg.type == int
+        assert zmq_port_arg.type is int
         assert zmq_port_arg.default == 30001
 
 
@@ -482,6 +476,7 @@ class TestCreateServiceDiscovery:
 
         # Verify it's a ZMQServiceDiscovery instance
         from dlrouter.core.zmq_discovery import ZMQServiceDiscovery
+
         assert isinstance(discovery, ZMQServiceDiscovery)
         assert discovery._host == '127.0.0.1'
         assert discovery._port == 30002
@@ -496,6 +491,7 @@ class TestCreateServiceDiscovery:
         discovery = backend.create_service_discovery({}, mock_node_manager)
 
         from dlrouter.core.zmq_discovery import ZMQServiceDiscovery
+
         assert isinstance(discovery, ZMQServiceDiscovery)
         assert discovery._host == '0.0.0.0'
         assert discovery._port == 30001
@@ -504,9 +500,159 @@ class TestCreateServiceDiscovery:
 
     def test_lmdeploy_backend_returns_none(self):
         from dlrouter.backends.lmdeploy_backend import LMDeployBackend
+
         backend = LMDeployBackend()
         mock_node_manager = MagicMock()
 
         discovery = backend.create_service_discovery({}, mock_node_manager)
 
         assert discovery is None
+
+
+# ---------------------------------------------------------------------------
+# PD request handling
+# ---------------------------------------------------------------------------
+
+
+class TestHandlePDRequest:
+    @pytest.mark.asyncio
+    async def test_handle_pd_request_no_pd_pair(self):
+        """Test handle_pd_request when no P/D instances available."""
+        backend = VLLMBackend()
+        mock_discovery = MagicMock()
+        mock_discovery.select_pd_pair.return_value = None
+
+        response = await backend.handle_pd_request(
+            {'model': 'test-model', 'messages': []},
+            'test-model',
+            '/v1/chat/completions',
+            stream=False,
+            service_discovery=mock_discovery,
+        )
+
+        assert response.status_code == 503
+        mock_discovery.select_pd_pair.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_handle_pd_request_prefill_error(self):
+        """Test handle_pd_request when prefill phase fails."""
+        backend = VLLMBackend()
+        mock_discovery = MagicMock()
+        mock_discovery.select_pd_pair.return_value = (
+            ('http://10.0.0.1:8200', '10.0.0.1:21001'),
+            ('http://10.0.0.2:8200', '10.0.0.2:22001'),
+        )
+        mock_discovery.build_request_id.return_value = 'test-request-id'
+
+        # Mock stream_forward_with_request_id to raise exception
+        async def mock_stream_error(*args, **kwargs):
+            raise Exception('Prefill failed')
+            yield  # Make it a generator
+
+        backend.stream_forward_with_request_id = mock_stream_error
+
+        response = await backend.handle_pd_request(
+            {'model': 'test-model', 'messages': []},
+            'test-model',
+            '/v1/chat/completions',
+            stream=False,
+            service_discovery=mock_discovery,
+        )
+
+        assert response.status_code == 502
+
+    @pytest.mark.asyncio
+    async def test_handle_pd_request_success_non_stream(self):
+        """Test handle_pd_request success (non-streaming)."""
+        backend = VLLMBackend()
+        mock_discovery = MagicMock()
+        mock_discovery.select_pd_pair.return_value = (
+            ('http://10.0.0.1:8200', '10.0.0.1:21001'),
+            ('http://10.0.0.2:8200', '10.0.0.2:22001'),
+        )
+        mock_discovery.build_request_id.return_value = 'test-request-id'
+
+        # Mock prefill (stream_forward_with_request_id)
+        async def mock_prefill_stream(*args, **kwargs):
+            yield b'data: {"done": true}\n\n'
+
+        # Mock decode (forward_with_request_id)
+        async def mock_forward(*args, **kwargs):
+            return '{"id": "cmpl-123", "choices": [{"text": "hello"}]}'
+
+        backend.stream_forward_with_request_id = mock_prefill_stream
+        backend.forward_with_request_id = mock_forward
+
+        response = await backend.handle_pd_request(
+            {'model': 'test-model', 'messages': []},
+            'test-model',
+            '/v1/chat/completions',
+            stream=False,
+            service_discovery=mock_discovery,
+        )
+
+        assert response.status_code == 200
+        mock_discovery.select_pd_pair.assert_called_once()
+        mock_discovery.build_request_id.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_handle_pd_request_success_stream(self):
+        """Test handle_pd_request success (streaming)."""
+        from fastapi.responses import StreamingResponse
+
+        backend = VLLMBackend()
+        mock_discovery = MagicMock()
+        mock_discovery.select_pd_pair.return_value = (
+            ('http://10.0.0.1:8200', '10.0.0.1:21001'),
+            ('http://10.0.0.2:8200', '10.0.0.2:22001'),
+        )
+        mock_discovery.build_request_id.return_value = 'test-request-id'
+
+        # Mock prefill
+        async def mock_prefill_stream(*args, **kwargs):
+            yield b'data: {"done": true}\n\n'
+
+        backend.stream_forward_with_request_id = mock_prefill_stream
+
+        response = await backend.handle_pd_request(
+            {'model': 'test-model', 'messages': []},
+            'test-model',
+            '/v1/chat/completions',
+            stream=True,
+            service_discovery=mock_discovery,
+        )
+
+        assert isinstance(response, StreamingResponse)
+        assert response.media_type == 'text/event-stream'
+
+    @pytest.mark.asyncio
+    async def test_handle_pd_request_decode_error_non_stream(self):
+        """Test handle_pd_request when decode phase fails (non-streaming)."""
+        backend = VLLMBackend()
+        mock_discovery = MagicMock()
+        mock_discovery.select_pd_pair.return_value = (
+            ('http://10.0.0.1:8200', '10.0.0.1:21001'),
+            ('http://10.0.0.2:8200', '10.0.0.2:22001'),
+        )
+        mock_discovery.build_request_id.return_value = 'test-request-id'
+
+        # Mock prefill success
+        async def mock_prefill_stream(*args, **kwargs):
+            yield b'data: {"done": true}\n\n'
+
+        # Mock decode error
+        async def mock_forward_error(*args, **kwargs):
+            raise Exception('Decode failed')
+
+        backend.stream_forward_with_request_id = mock_prefill_stream
+        backend.forward_with_request_id = mock_forward_error
+
+        response = await backend.handle_pd_request(
+            {'model': 'test-model', 'messages': []},
+            'test-model',
+            '/v1/chat/completions',
+            stream=False,
+            service_discovery=mock_discovery,
+        )
+
+        assert response.status_code == 502

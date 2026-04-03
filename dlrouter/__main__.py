@@ -55,7 +55,8 @@ def build_base_parser() -> argparse.ArgumentParser:
 
     # Help option (manual)
     parser.add_argument(
-        '-h', '--help',
+        '-h',
+        '--help',
         action='store_true',
         help='Show this help message and exit',
     )
@@ -158,7 +159,7 @@ def add_backend_args(
             'help': arg.help,
         }
 
-        if arg.type == bool:
+        if arg.type is bool:
             # Boolean args use store_true
             if arg.default is False:
                 kwargs['action'] = 'store_true'
@@ -199,11 +200,7 @@ def extract_backend_config(
         return {}
 
     backend_arg_names = [a.name for a in backend_cls.get_cli_args()]
-    return {
-        k: getattr(args, k)
-        for k in backend_arg_names
-        if hasattr(args, k)
-    }
+    return {k: getattr(args, k) for k in backend_arg_names if hasattr(args, k)}
 
 
 def serve(
@@ -292,8 +289,7 @@ def _run_with_gunicorn(
         import gunicorn.app.base
     except ImportError:
         print(
-            'Error: gunicorn is required for multi-process mode.\n'
-            'Install it with: pip install gunicorn',
+            'Error: gunicorn is required for multi-process mode.\nInstall it with: pip install gunicorn',
             file=sys.stderr,
         )
         sys.exit(1)
@@ -349,11 +345,7 @@ def _run_with_gunicorn(
     # Create app factory that reads config from environment
     def app_factory():
         config_json = os.environ.get('DLROUTER_CONFIG_JSON')
-        cfg = (
-            RouterConfig.model_validate_json(config_json)
-            if config_json
-            else RouterConfig()
-        )
+        cfg = RouterConfig.model_validate_json(config_json) if config_json else RouterConfig()
         return create_app(cfg)
 
     # Run Gunicorn
@@ -370,7 +362,7 @@ def main():
 
     # Phase 1: Parse known args to get backend type
     parser = build_base_parser()
-    args, remaining = parser.parse_known_args()
+    args, _ = parser.parse_known_args()
 
     # Phase 2: Add backend-specific args
     add_backend_args(parser, args.backend)

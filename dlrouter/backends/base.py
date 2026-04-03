@@ -101,6 +101,34 @@ class BaseBackend(ABC):
         """Whether this backend supports PD disagg."""
         return False
 
+    async def handle_pd_request(
+        self,
+        request_data: dict[str, Any],
+        model_name: str,
+        endpoint: str,
+        stream: bool,
+        service_discovery: Any,
+    ) -> Any:
+        """Handle request in PD disaggregation mode.
+
+        Backends with their own PD implementation should override this.
+        For example, vLLM uses ZMQ service discovery for P/D coordination.
+
+        Args:
+            request_data: The request payload.
+            model_name: Requested model name.
+            endpoint: API endpoint path.
+            stream: Whether to stream response.
+            service_discovery: Backend-specific service discovery instance.
+
+        Returns:
+            Response (StreamingResponse or JSONResponse).
+
+        Raises:
+            NotImplementedError: If backend doesn't support PD.
+        """
+        raise NotImplementedError(f'{self.__class__.__name__} does not implement handle_pd_request')
+
     async def prefill_request(
         self,
         node_url: str,

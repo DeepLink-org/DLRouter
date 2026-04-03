@@ -1,6 +1,6 @@
 """Backend factory."""
 
-from typing import Any, Optional, Type
+from typing import Any, Optional
 
 from dlrouter.backends.base import BaseBackend
 from dlrouter.backends.lmdeploy_backend import LMDeployBackend
@@ -9,13 +9,13 @@ from dlrouter.constants import BackendType
 
 
 # Registry of backend classes
-_BACKEND_REGISTRY: dict[BackendType, Type[BaseBackend]] = {
+_BACKEND_REGISTRY: dict[BackendType, type[BaseBackend]] = {
     BackendType.LMDEPLOY: LMDeployBackend,
     BackendType.VLLM: VLLMBackend,
 }
 
 
-def get_backend_class(backend_type: BackendType) -> Type[BaseBackend]:
+def get_backend_class(backend_type: BackendType) -> type[BaseBackend]:
     """Get the backend class for a given type.
 
     Args:
@@ -29,8 +29,7 @@ def get_backend_class(backend_type: BackendType) -> Type[BaseBackend]:
     """
     if backend_type not in _BACKEND_REGISTRY:
         raise ValueError(
-            f'Unsupported backend: {backend_type}. '
-            f'Available: {[e.value for e in BackendType]}',
+            f'Unsupported backend: {backend_type}. Available: {[e.value for e in BackendType]}',
         )
     return _BACKEND_REGISTRY[backend_type]
 
