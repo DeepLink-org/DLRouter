@@ -326,10 +326,10 @@ class ProxyEngine:
                 for msg in messages:
                     if isinstance(msg, dict):
                         content = msg.get('content', '')
-                        if content:
+                        if content is not None:
                             parts.append(str(content))
                     elif hasattr(msg, 'content'):
-                        if msg.content:
+                        if msg.content is not None:
                             parts.append(str(msg.content))
                 return '\n'.join(parts) if parts else None
 
