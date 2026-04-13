@@ -79,17 +79,43 @@ class TestRegistration:
         assert instances[0].http_address == '10.0.0.2:8000'
         assert instances[0].zmq_address == '10.0.0.2:30001'
 
+    def test_handle_zmq_message_preserves_optional_metadata(self):
+        discovery = ZMQHeartbeatDiscovery()
+        mock_socket = MagicMock()
+        mock_socket.recv_multipart.return_value = [
+            b'worker-a',
+            __import__('msgpack').dumps(
+                {
+                    'type': 'P',
+                    'http_address': '10.0.0.1:8000',
+                    'zmq_address': '10.0.0.1:30001',
+                    'metadata': {'kv_connector': 'mooncake', 'protocol_version': 'v1'},
+                }
+            ),
+        ]
+        discovery._router_socket = mock_socket
+
+        discovery._handle_zmq_message()
+
+        instances = discovery.get_prefill_instances()
+        assert len(instances) == 1
+        assert instances[0].metadata == {
+            'kv_connector': 'mooncake',
+            'protocol_version': 'v1',
+        }
+
     def test_expired_instances_removed(self):
         discovery = ZMQHeartbeatDiscovery()
         past_time = time.time() - 10  # Already expired
 
-        with discovery._prefill_lock:
-            discovery._prefill_instances['expired:8000'] = NodeInfo(
+        discovery._registry.upsert(
+            NodeInfo(
                 http_address='expired:8000',
                 zmq_address='expired:30001',
                 role=EngineRole.PREFILL,
                 expiration=past_time,
             )
+        )
 
         # get_prefill_count triggers cleanup
         assert discovery.get_prefill_count() == 0
@@ -154,48 +180,14 @@ class TestSelection:
 
 
 # ---------------------------------------------------------------------------
-# Request ID Building
+# Legacy request-id cleanup
 # ---------------------------------------------------------------------------
 
 
-class TestRequestIdBuilding:
-    def test_build_request_id_format(self):
+class TestLegacyRequestIdCleanup:
+    def test_build_request_id_is_no_longer_exposed(self):
         discovery = ZMQHeartbeatDiscovery()
-        prefill = NodeInfo(
-            http_address='10.0.0.1:8000',
-            zmq_address='10.0.0.1:30001',
-            role=EngineRole.PREFILL,
-        )
-        decode = NodeInfo(
-            http_address='10.0.0.2:8000',
-            zmq_address='10.0.0.2:30001',
-            role=EngineRole.DECODE,
-        )
-        request_id = discovery.build_request_id(
-            prefill,
-            decode,
-            'abc123',
-        )
-
-        assert '___prefill_addr_10.0.0.1:30001' in request_id
-        assert '___decode_addr_10.0.0.2:30001' in request_id
-        assert 'abc123' in request_id
-
-    def test_build_request_id_uniqueness(self):
-        discovery = ZMQHeartbeatDiscovery()
-        prefill = NodeInfo(
-            http_address='10.0.0.1:8000',
-            zmq_address='p1',
-            role=EngineRole.PREFILL,
-        )
-        decode = NodeInfo(
-            http_address='10.0.0.2:8000',
-            zmq_address='d1',
-            role=EngineRole.DECODE,
-        )
-        id1 = discovery.build_request_id(prefill, decode, 'uuid1')
-        id2 = discovery.build_request_id(prefill, decode, 'uuid2')
-        assert id1 != id2
+        assert not hasattr(discovery, 'build_request_id')
 
 
 # ---------------------------------------------------------------------------
@@ -296,23 +288,26 @@ class TestMessageHandling:
         past = time.time() - 10
         future = time.time() + 100
 
-        with discovery._prefill_lock:
-            discovery._prefill_instances['expired:8000'] = NodeInfo(
+        discovery._registry.upsert(
+            NodeInfo(
                 http_address='expired:8000',
                 zmq_address='expired:30001',
                 role=EngineRole.PREFILL,
                 expiration=past,
             )
-            discovery._prefill_instances['valid:8000'] = NodeInfo(
+        )
+        discovery._registry.upsert(
+            NodeInfo(
                 http_address='valid:8000',
                 zmq_address='valid:30001',
                 role=EngineRole.PREFILL,
                 expiration=future,
             )
-            discovery._remove_expired(discovery._prefill_instances)
+        )
 
-        assert 'expired:8000' not in discovery._prefill_instances
-        assert 'valid:8000' in discovery._prefill_instances
+        discovery._remove_expired()
+
+        assert [node.http_address for node in discovery.get_prefill_instances()] == ['valid:8000']
 
 
 # ---------------------------------------------------------------------------
@@ -390,14 +385,15 @@ class TestNodeManagerSync:
 
         past = time.time() - 10
 
-        with discovery._prefill_lock:
-            discovery._prefill_instances['expired:8000'] = NodeInfo(
+        discovery._registry.upsert(
+            NodeInfo(
                 http_address='expired:8000',
                 zmq_address='expired:30001',
                 role=EngineRole.PREFILL,
                 expiration=past,
             )
-            discovery._remove_expired(discovery._prefill_instances)
+        )
+        discovery._remove_expired()
 
         # Verify node_manager.remove was called for expired instance
         mock_node_manager.remove.assert_called_once_with('http://expired:8000')
@@ -413,3 +409,45 @@ class TestNodeManagerSync:
         )
         # Should not raise despite node_manager error
         discovery._register_prefill('10.0.0.1:8000', '10.0.0.1:30001')
+
+    def test_new_registration_fetches_models_before_sync(self):
+        """New heartbeat nodes should fetch models before registry upsert and sync."""
+        mock_node_manager = MagicMock()
+        mock_node_manager.backend.fetch_models.return_value = ['Qwen3-4B']
+        discovery = ZMQHeartbeatDiscovery(node_manager=mock_node_manager)
+
+        discovery._register_decode('10.0.0.2:8000', '10.0.0.2:30001')
+
+        mock_node_manager.backend.fetch_models.assert_called_once_with('http://10.0.0.2:8000')
+        instances = discovery.get_decode_instances()
+        assert len(instances) == 1
+        assert instances[0].models == ['Qwen3-4B']
+
+        mock_node_manager.add.assert_called_once()
+        call_args = mock_node_manager.add.call_args
+        assert call_args[0][0] == 'http://10.0.0.2:8000'
+        assert call_args[0][1].models == ['Qwen3-4B']
+
+    def test_new_registration_skips_sync_when_models_unavailable(self):
+        """Heartbeat nodes should be skipped when model fetch returns empty."""
+        mock_node_manager = MagicMock()
+        mock_node_manager.backend.fetch_models.return_value = []
+        discovery = ZMQHeartbeatDiscovery(node_manager=mock_node_manager)
+
+        discovery._register_prefill('10.0.0.1:8000', '10.0.0.1:30001')
+
+        mock_node_manager.backend.fetch_models.assert_called_once_with('http://10.0.0.1:8000')
+        assert discovery.get_prefill_instances() == []
+        mock_node_manager.add.assert_not_called()
+
+    def test_failed_registration_is_throttled_until_next_retry_window(self):
+        """Repeated heartbeats should not refetch models on every failed registration."""
+        mock_node_manager = MagicMock()
+        mock_node_manager.backend.fetch_models.return_value = []
+        discovery = ZMQHeartbeatDiscovery(node_manager=mock_node_manager)
+
+        discovery._register_decode('10.0.0.2:8000', '10.0.0.2:30001')
+        discovery._register_decode('10.0.0.2:8000', '10.0.0.2:30001')
+
+        mock_node_manager.backend.fetch_models.assert_called_once_with('http://10.0.0.2:8000')
+        assert discovery.get_decode_instances() == []

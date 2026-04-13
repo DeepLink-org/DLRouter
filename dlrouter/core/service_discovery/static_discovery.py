@@ -49,14 +49,6 @@ class StaticServiceDiscovery(BaseServiceDiscovery):
         """
         super().__init__(node_manager, models)
 
-        # Instance registries: http_address -> NodeInfo
-        self._prefill_instances: dict[str, NodeInfo] = {}
-        self._decode_instances: dict[str, NodeInfo] = {}
-
-        # Thread-safe access
-        self._prefill_lock = threading.Lock()
-        self._decode_lock = threading.Lock()
-
         # Counter for round-robin selection
         self._counter = 0
         self._counter_lock = threading.Lock()
@@ -64,22 +56,34 @@ class StaticServiceDiscovery(BaseServiceDiscovery):
         # Initialize with provided instances
         if prefill_instances:
             for node in prefill_instances:
-                self._prefill_instances[node.http_address] = node
+                self._registry.upsert(node)
 
         if decode_instances:
             for node in decode_instances:
-                self._decode_instances[node.http_address] = node
+                self._registry.upsert(node)
 
     # -- Lifecycle --
 
     def start(self) -> None:
         """Start static discovery (no background task needed)."""
         self._running = True
-        # Sync initial instances to NodeManager
-        for node in self.get_prefill_instances():
-            self._sync_to_node_manager(node)
-        for node in self.get_decode_instances():
-            self._sync_to_node_manager(node)
+        # Sync initial instances to NodeManager only after models are ready.
+        for node in list(self.get_prefill_instances()):
+            prepared = self._prepare_node_for_registration(node)
+            if prepared is None:
+                self._registry.remove(node)
+                logger.warning(f'⚠️ Skip Prefill [HTTP:{node.http_address}] because models are unavailable')
+                continue
+            self._registry.upsert(prepared)
+            self._sync_to_node_manager(prepared)
+        for node in list(self.get_decode_instances()):
+            prepared = self._prepare_node_for_registration(node)
+            if prepared is None:
+                self._registry.remove(node)
+                logger.warning(f'⚠️ Skip Decode [HTTP:{node.http_address}] because models are unavailable')
+                continue
+            self._registry.upsert(prepared)
+            self._sync_to_node_manager(prepared)
         logger.info(f'Static service discovery started with {self.get_prefill_count()}P, {self.get_decode_count()}D')
 
     def stop(self) -> None:
@@ -91,29 +95,26 @@ class StaticServiceDiscovery(BaseServiceDiscovery):
 
     def select_prefill(self) -> Optional[NodeInfo]:
         """Select a prefill instance using round-robin."""
-        with self._prefill_lock:
-            instances = list(self._prefill_instances.values())
-            if not instances:
-                return None
+        instances = self.get_prefill_instances()
+        if not instances:
+            return None
 
-            with self._counter_lock:
-                idx = self._counter % len(instances)
-                # Increment counter for next selection
-                self._counter += 1
+        with self._counter_lock:
+            idx = self._counter % len(instances)
+            self._counter += 1
 
-            return instances[idx]
+        return instances[idx]
 
     def select_decode(self) -> Optional[NodeInfo]:
         """Select a decode instance using round-robin."""
-        with self._decode_lock:
-            instances = list(self._decode_instances.values())
-            if not instances:
-                return None
+        instances = self.get_decode_instances()
+        if not instances:
+            return None
 
-            with self._counter_lock:
-                idx = self._counter % len(instances)
+        with self._counter_lock:
+            idx = self._counter % len(instances)
 
-            return instances[idx]
+        return instances[idx]
 
     # -- Manual Node Management --
 
@@ -140,13 +141,17 @@ class StaticServiceDiscovery(BaseServiceDiscovery):
             metadata=metadata or {},
         )
 
-        with self._prefill_lock:
-            is_new = http_address not in self._prefill_instances
-            self._prefill_instances[http_address] = node
+        existing = next((item for item in self.get_prefill_instances() if item.http_address == http_address), None)
+        is_new = existing is None
+        prepared = self._prepare_node_for_registration(node)
+        if prepared is None:
+            logger.warning(f'⚠️ Skip Prefill [HTTP:{http_address}] because models are unavailable')
+            return
+        self._registry.upsert(prepared)
 
         if is_new:
             logger.info(f'🔵 Add Prefill [HTTP:{http_address}, ZMQ:{zmq_address}]')
-            self._sync_to_node_manager(node)
+            self._sync_to_node_manager(prepared)
 
     def add_decode(
         self,
@@ -164,18 +169,23 @@ class StaticServiceDiscovery(BaseServiceDiscovery):
             metadata=metadata or {},
         )
 
-        with self._decode_lock:
-            is_new = http_address not in self._decode_instances
-            self._decode_instances[http_address] = node
+        existing = next((item for item in self.get_decode_instances() if item.http_address == http_address), None)
+        is_new = existing is None
+        prepared = self._prepare_node_for_registration(node)
+        if prepared is None:
+            logger.warning(f'⚠️ Skip Decode [HTTP:{http_address}] because models are unavailable')
+            return
+        self._registry.upsert(prepared)
 
         if is_new:
             logger.info(f'🔵 Add Decode [HTTP:{http_address}, ZMQ:{zmq_address}]')
-            self._sync_to_node_manager(node)
+            self._sync_to_node_manager(prepared)
 
     def remove_prefill(self, http_address: str) -> None:
         """Remove a prefill instance."""
-        with self._prefill_lock:
-            node = self._prefill_instances.pop(http_address, None)
+        node = next((item for item in self.get_prefill_instances() if item.http_address == http_address), None)
+        if node:
+            self._registry.remove(node)
 
         if node:
             logger.info(f'🔴 Remove Prefill [HTTP:{http_address}]')
@@ -183,34 +193,13 @@ class StaticServiceDiscovery(BaseServiceDiscovery):
 
     def remove_decode(self, http_address: str) -> None:
         """Remove a decode instance."""
-        with self._decode_lock:
-            node = self._decode_instances.pop(http_address, None)
+        node = next((item for item in self.get_decode_instances() if item.http_address == http_address), None)
+        if node:
+            self._registry.remove(node)
 
         if node:
             logger.info(f'🔴 Remove Decode [HTTP:{http_address}]')
             self._remove_from_node_manager(node)
-
-    # -- Query --
-
-    def get_prefill_count(self) -> int:
-        """Get number of prefill instances."""
-        with self._prefill_lock:
-            return len(self._prefill_instances)
-
-    def get_decode_count(self) -> int:
-        """Get number of decode instances."""
-        with self._decode_lock:
-            return len(self._decode_instances)
-
-    def get_prefill_instances(self) -> list[NodeInfo]:
-        """Get list of all prefill instances."""
-        with self._prefill_lock:
-            return list(self._prefill_instances.values())
-
-    def get_decode_instances(self) -> list[NodeInfo]:
-        """Get list of all decode instances."""
-        with self._decode_lock:
-            return list(self._decode_instances.values())
 
     # -- Bulk Operations --
 
@@ -220,37 +209,33 @@ class StaticServiceDiscovery(BaseServiceDiscovery):
         Args:
             instances: New list of prefill instances.
         """
-        with self._prefill_lock:
-            # Remove old instances
-            old_keys = set(self._prefill_instances.keys())
-            new_keys = {n.http_address for n in instances}
+        current = {node.http_address: node for node in self.get_prefill_instances()}
+        new = {node.http_address: node for node in instances}
 
-            for key in old_keys - new_keys:
-                node = self._prefill_instances.pop(key)
-                self._remove_from_node_manager(node)
+        for key in current.keys() - new.keys():
+            self._registry.remove(current[key])
+            self._remove_from_node_manager(current[key])
 
-            # Add new instances
-            for node in instances:
-                if node.http_address not in self._prefill_instances:
-                    self._sync_to_node_manager(node)
-                self._prefill_instances[node.http_address] = node
+        for key, node in new.items():
+            if key not in current:
+                self._sync_to_node_manager(node)
+            self._registry.upsert(node)
 
         logger.info(f'Set {len(instances)} prefill instances')
 
     def set_decode_instances(self, instances: list[NodeInfo]) -> None:
         """Replace all decode instances."""
-        with self._decode_lock:
-            old_keys = set(self._decode_instances.keys())
-            new_keys = {n.http_address for n in instances}
+        current = {node.http_address: node for node in self.get_decode_instances()}
+        new = {node.http_address: node for node in instances}
 
-            for key in old_keys - new_keys:
-                node = self._decode_instances.pop(key)
-                self._remove_from_node_manager(node)
+        for key in current.keys() - new.keys():
+            self._registry.remove(current[key])
+            self._remove_from_node_manager(current[key])
 
-            for node in instances:
-                if node.http_address not in self._decode_instances:
-                    self._sync_to_node_manager(node)
-                self._decode_instances[node.http_address] = node
+        for key, node in new.items():
+            if key not in current:
+                self._sync_to_node_manager(node)
+            self._registry.upsert(node)
 
         logger.info(f'Set {len(instances)} decode instances')
 

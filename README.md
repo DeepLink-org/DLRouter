@@ -14,14 +14,14 @@ A high-performance router / load balancer for large language model (LLM) inferen
   - `prefix_cache` — Prefix-aware routing that routes requests with shared prefixes to the same node to maximize KV cache reuse.
 - **Multi-Backend Architecture** — Pluggable backend adapters via the `BaseBackend` interface. Currently supported:
   - **LMDeploy** (including PD disaggregation / DistServe)
-  - **vLLM** (standard OpenAI-compatible API forwarding, plus PD disaggregation via ZMQ service discovery)
+  - **vLLM** (hybrid OpenAI-compatible forwarding via explicitly registered nodes, plus DistServe two-stage PD orchestration with static or heartbeat discovery)
 - **PD Disaggregation (DistServe)** — First-class support for LMDeploy's and vLLM's Prefill-Decode separation, with automatic PD connection management and migration request handling.
 - **Backend-Owned DistServe Flow** — `ProxyEngine` only dispatches DistServe requests; each backend owns its own PD orchestration (`LMDeploy` via `NodeManager`, `vLLM` via service discovery).
 - **Dynamic Node Management** — Register, remove, and terminate backend nodes at runtime via REST API.
 - **Automatic Health Checks** — Background heartbeat thread removes unhealthy nodes automatically.
 - **API Key Authentication** — Optional Bearer token authentication for all endpoints.
 - **SSL / TLS Support** — Enable HTTPS via environment variables.
-- **Clear Discovery Semantics** — `HYBRID` nodes are added explicitly; `DISTSERVE` uses either `static` or `heartbeat` discovery for vLLM PD.
+- **Clear Discovery Semantics** — `HYBRID` nodes are added explicitly; `DISTSERVE` uses either `static` or `heartbeat` discovery for vLLM PD. In vLLM heartbeat mode, a node becomes routable only after model information is available.
 
 ## Project Structure
 
@@ -63,16 +63,27 @@ DLRouter/
 │       └── factory.py         # Strategy factory
 ├── tests/
 │   ├── backends/
-│   │   ├── test_lmdeploy_backend.py # LMDeploy backend PD tests
-│   │   └── test_vllm_backend.py     # vLLM backend unit tests
+│   │   ├── test_backend_contracts.py   # Backend interface contract tests
+│   │   ├── test_backend_definitions.py # Backend definition tests
+│   │   ├── test_lmdeploy_backend.py    # LMDeploy backend PD tests
+│   │   ├── test_vllm_backend.py        # vLLM backend unit tests
+│   │   ├── test_vllm_kv_transfer.py    # KV transfer adapter tests
+│   │   ├── test_vllm_pair_selection.py # PD pair selection tests
+│   │   ├── test_vllm_request_id.py     # Request ID encoding tests
+│   │   └── test_vllm_two_stage.py      # Two-stage PD executor tests
 │   ├── core/
-│   │   ├── test_proxy_engine.py   # ProxyEngine delegation tests
+│   │   ├── test_health_check.py             # Health checker tests
+│   │   ├── test_proxy_engine.py             # ProxyEngine delegation tests
 │   │   ├── test_service_discovery_factory.py # Discovery factory tests
-│   │   └── test_zmq_discovery.py  # ZMQ heartbeat discovery tests
+│   │   ├── test_service_discovery_registry.py # Unified registry tests
+│   │   ├── test_static_discovery.py         # Static discovery tests
+│   │   └── test_zmq_discovery.py            # ZMQ heartbeat discovery tests
 │   ├── routing/
 │   │   └── test_routing.py        # Routing strategy unit tests
-│   └── utils/
-│       └── test_request_key.py    # Request key extraction tests
+│   ├── utils/
+│   │   └── test_request_key.py    # Request key extraction tests
+│   ├── test_app_vllm_discovery.py # App factory discovery inference tests
+│   └── test_cli_backend_loading.py # CLI backend loading tests
 ├── Makefile                   # Dev commands (format, lint, test, etc.)
 └── pyproject.toml             # Project metadata & tool configuration
 ```
@@ -124,12 +135,11 @@ dlrouter
 | `--dummy_prefill` | `False` | Use dummy prefill (for testing) |
 
 *vLLM options:*
-| `--discovery_mode` | `heartbeat` | Node discovery mode for vLLM PD (`static` / `heartbeat`) |
 | `--zmq_host` | `0.0.0.0` | ZMQ service discovery bind host |
 | `--zmq_port` | `30001` | ZMQ service discovery port |
 | `--zmq_ping_timeout` | `5` | ZMQ instance ping timeout (seconds) |
-| `--prefill_urls` | `None` | Comma-separated prefill URLs (used in `static` mode) |
-| `--decode_urls` | `None` | Comma-separated decode URLs (used in `static` mode) |
+| `--prefill_urls` | `None` | Comma-separated prefill URLs (when set together with `--decode_urls`, DLRouter infers static mode) |
+| `--decode_urls` | `None` | Comma-separated decode URLs (when set together with `--prefill_urls`, DLRouter infers static mode) |
 | `--models` | `None` | Comma-separated model names (optional, auto-fetched from nodes) |
 
 ### Examples
@@ -149,15 +159,73 @@ python -m dlrouter --serving_strategy distserve --backend vllm --zmq_port 30001
 
 # vLLM PD disaggregation mode (static P/D lists)
 python -m dlrouter --serving_strategy distserve --backend vllm \
-  --discovery_mode static \
   --prefill_urls "http://10.21.9.10:30000" \
   --decode_urls "http://10.21.9.15:30000"
 
-# Use vllm as backend (standard mode)
+# Use vLLM as backend in hybrid mode (register nodes via /nodes/add)
 python -m dlrouter --backend vllm
 
 # Multi workers
 python -m dlrouter --workers 4
+```
+
+## vLLM Usage
+
+### vLLM Hybrid
+
+Use `hybrid` when you want DLRouter to forward requests to standard vLLM OpenAI-compatible instances.
+
+```bash
+# Start a single vLLM instance
+vllm serve /path/to/model \
+  --host 0.0.0.0 \
+  --port 8100 \
+  --served-model-name Qwen3-4B
+
+# Start DLRouter
+python -m dlrouter \
+  --serving_strategy hybrid \
+  --backend vllm \
+  --disable_cache_status
+
+# Register the vLLM node
+curl -X POST http://localhost:8000/nodes/add \
+  -H "Content-Type: application/json" \
+  -d '{"url": "http://127.0.0.1:8100"}'
+
+# Send a request through DLRouter
+curl -X POST http://localhost:8000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "Qwen3-4B",
+    "messages": [{"role": "user", "content": "Hello!"}],
+    "stream": false
+  }'
+```
+
+`/nodes/add` can also include an explicit `status.models` payload, but for vLLM it is usually enough to register the node URL and let DLRouter fetch `/v1/models`.
+
+### vLLM DistServe
+
+Use `distserve` when prefill and decode are separated.
+
+- `static` mode is for explicitly configured prefill/decode URLs.
+- `heartbeat` mode is for self-registering prefill/decode instances that publish HTTP and ZMQ addresses.
+- DLRouter infers `static` when both `--prefill_urls` and `--decode_urls` are provided.
+- DLRouter infers `heartbeat` when neither URL list is provided.
+- Providing only one of the two URL lists is treated as a configuration error.
+- In vLLM heartbeat mode, DLRouter fetches model information before admitting a node into the routable set.
+- If a restarted node is sending heartbeats before its HTTP API is ready, DLRouter temporarily skips registration and later heartbeats retry automatically.
+
+Typical heartbeat startup:
+
+```bash
+python -m dlrouter \
+  --serving_strategy distserve \
+  --backend vllm \
+  --zmq_host 0.0.0.0 \
+  --zmq_port 30001 \
+  --disable_cache_status
 ```
 
 ## API Reference
@@ -179,12 +247,13 @@ python -m dlrouter --workers 4
 | `POST` | `/nodes/add` | Register a new backend node |
 | `POST` | `/nodes/remove` | Remove a registered node |
 | `POST` | `/nodes/terminate` | Terminate and remove a node |
-| `GET` | `/nodes/terminate_all` | Terminate all nodes |
+| `POST` | `/nodes/terminate_all` | Terminate all nodes |
 
 ### Discovery Semantics
 
 - `HYBRID`: backend instances are registered explicitly, typically via `/nodes/add` or direct `NodeManager.add(...)`.
-- `DISTSERVE + vLLM`: discovery mode is either `static` or `heartbeat`.
+- `DISTSERVE + vLLM`: providing both `prefill_urls` and `decode_urls` selects `static`; providing neither selects `heartbeat`.
+- `DISTSERVE + vLLM + heartbeat`: a node enters the routable set only after DLRouter has resolved its model information.
 - `DISTSERVE + LMDeploy`: Prefill/Decode nodes are still selected from `NodeManager`; no separate discovery component is created.
 
 ### Usage Example
@@ -307,7 +376,7 @@ Request ────► Prefill (max_tokens=1) ──► P Node
               Decode ──────────────────► D Node ──► Response
 ```
 
-vLLM DistServe keeps using backend-owned PD orchestration as well, but its node selection source is `service_discovery` rather than `NodeManager`.
+vLLM DistServe keeps using backend-owned PD orchestration as well, but its node selection source is `service_discovery` rather than `NodeManager`. In heartbeat mode, a node is admitted only after model information has been resolved, so restarted nodes may briefly stay out of the routable set until their HTTP API is ready.
 
 ## Acknowledgements
 

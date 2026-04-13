@@ -34,6 +34,7 @@ from dlrouter.core.service_discovery.base import BaseServiceDiscovery, NodeInfo
 from dlrouter.core.service_discovery.heartbeat_discovery import (
     HeartbeatServiceDiscovery,
 )
+from dlrouter.core.service_discovery.registry import ServiceDiscoveryRegistry
 from dlrouter.core.service_discovery.static_discovery import (
     StaticServiceDiscovery,
 )
@@ -152,6 +153,7 @@ __all__ = [
     'HeartbeatServiceDiscovery',
     'NodeInfo',
     'ServiceDiscoveryMode',
+    'ServiceDiscoveryRegistry',
     'StaticServiceDiscovery',
     'ZMQHeartbeatDiscovery',
     'create_service_discovery',

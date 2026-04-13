@@ -5,18 +5,18 @@ for vLLM inference engine, including PD disaggregation mode.
 """
 
 import asyncio
-import json
 import os
-import uuid
 from collections.abc import AsyncIterator
 from typing import TYPE_CHECKING, Any, Optional
 
 import aiohttp
 import requests
-from fastapi.responses import JSONResponse, StreamingResponse
 
 from dlrouter.backends.base import BaseBackend, CLIArg, PDRequestContext
 from dlrouter.backends.vllm.config import VLLMPDConfig
+from dlrouter.backends.vllm.kv_transfer import VLLMKVTransferAdapter
+from dlrouter.backends.vllm.pair_selection import VLLMPairSelector
+from dlrouter.backends.vllm.two_stage import VLLMTwoStagePDExecutor
 from dlrouter.constants import (
     AIOHTTP_TIMEOUT,
     HEALTH_CHECK_TIMEOUT,
@@ -42,9 +42,11 @@ class VLLMBackend(BaseBackend):
 
     def __init__(
         self,
+        pd_config: Optional[VLLMPDConfig] = None,
         pool_connections: int = DEFAULT_POOL_CONNECTIONS,
         pool_maxsize: int = DEFAULT_POOL_MAXSIZE,
     ) -> None:
+        self.pd_config = pd_config or VLLMPDConfig()
         self._timeout = aiohttp.ClientTimeout(total=AIOHTTP_TIMEOUT)
         self._health_timeout = aiohttp.ClientTimeout(
             total=HEALTH_CHECK_TIMEOUT,
@@ -57,6 +59,12 @@ class VLLMBackend(BaseBackend):
         }
         self._session: Optional[aiohttp.ClientSession] = None
         self._session_lock: Optional[asyncio.Lock] = None
+
+    @classmethod
+    def create(cls, parsed_config: Any = None) -> 'VLLMBackend':
+        """Create a vLLM backend instance from parsed configuration."""
+        config = parsed_config if isinstance(parsed_config, VLLMPDConfig) else VLLMPDConfig()
+        return cls(pd_config=config)
 
     async def _get_session(self) -> aiohttp.ClientSession:
         """Get or create a persistent aiohttp session."""
@@ -212,13 +220,6 @@ class VLLMBackend(BaseBackend):
         """Return vLLM-specific CLI arguments."""
         return [
             CLIArg(
-                name='discovery_mode',
-                type=str,
-                default='heartbeat',
-                help='Service discovery mode: static (manual config) or heartbeat (ZMQ)',
-                choices=['static', 'heartbeat'],
-            ),
-            CLIArg(
                 name='zmq_host',
                 type=str,
                 default='0.0.0.0',
@@ -271,10 +272,14 @@ class VLLMBackend(BaseBackend):
         if kwargs.get('decode_urls'):
             decode_urls = [u.strip() for u in kwargs['decode_urls'].split(',')]
 
-        discovery_mode = ServiceDiscoveryMode(kwargs.get('discovery_mode', 'heartbeat'))
+        discovery_mode = cls._infer_discovery_mode(
+            prefill_urls=prefill_urls,
+            decode_urls=decode_urls,
+        )
 
         return VLLMPDConfig(
             discovery_mode=discovery_mode,
+            pd_protocol=kwargs.get('pd_protocol', 'two_stage_kv_transfer'),
             zmq_host=kwargs.get('zmq_host', '0.0.0.0'),
             zmq_port=kwargs.get('zmq_port', 30001),
             ping_timeout_seconds=kwargs.get('zmq_ping_timeout', 5),
@@ -282,6 +287,24 @@ class VLLMBackend(BaseBackend):
             prefill_urls=prefill_urls,
             decode_urls=decode_urls,
         )
+
+    @staticmethod
+    def _infer_discovery_mode(
+        *,
+        prefill_urls: list[str],
+        decode_urls: list[str],
+    ) -> ServiceDiscoveryMode:
+        """Infer discovery mode from configured P/D URL lists."""
+        has_prefill = bool(prefill_urls)
+        has_decode = bool(decode_urls)
+
+        if has_prefill != has_decode:
+            raise ValueError('prefill_urls and decode_urls must be provided together')
+
+        if has_prefill:
+            return ServiceDiscoveryMode.STATIC
+
+        return ServiceDiscoveryMode.HEARTBEAT
 
     def create_service_discovery(
         self,
@@ -342,79 +365,19 @@ class VLLMBackend(BaseBackend):
         context: PDRequestContext,
     ) -> Any:
         """Handle request in vLLM PD disaggregation mode."""
-        service_discovery = context.service_discovery
-        if service_discovery is None:
-            logger.warning('No service discovery configured for vLLM PD request')
-            return JSONResponse(
-                {'error': 'No service discovery configured for vLLM PD mode'},
-                status_code=503,
-            )
-
-        pd_pair = service_discovery.select_pd_pair()
-        if pd_pair is None:
-            logger.warning('No P/D instances available')
-            return JSONResponse(
-                {'error': 'No prefill or decode instances available'},
-                status_code=503,
-            )
-
-        prefill_info, decode_info = pd_pair
-        base_id = uuid.uuid4().hex
-        request_id = service_discovery.build_request_id(prefill_info, decode_info, base_id)
-
-        logger.info(
-            f'vLLM PD: [HTTP:{prefill_info.http_address}, ZMQ:{prefill_info.zmq_address}] -> '
-            f'[HTTP:{decode_info.http_address}, ZMQ:{decode_info.zmq_address}]'
+        return await self._build_two_stage_executor().execute(
+            request_data=request_data,
+            endpoint=endpoint,
+            stream=stream,
+            context=context,
         )
 
-        p_url = prefill_info.to_http_url()
-        d_url = decode_info.to_http_url()
-
-        prefill_request = request_data.copy()
-        prefill_request['max_tokens'] = 1
-        if 'max_completion_tokens' in prefill_request:
-            prefill_request['max_completion_tokens'] = 1
-
-        try:
-            async for _ in self.stream_forward_with_request_id(p_url, endpoint, prefill_request, request_id):
-                pass
-        except Exception as e:
-            logger.error(f'vLLM PD prefill error: {e}')
-            return JSONResponse(
-                {'error': f'Prefill phase failed: {e}'},
-                status_code=502,
-            )
-
-        if stream:
-            gen = self._stream_generate_pd(d_url, endpoint, request_data, request_id)
-            return StreamingResponse(
-                gen,
-                media_type='text/event-stream',
-            )
-
-        try:
-            text = await self.forward_with_request_id(d_url, endpoint, request_data, request_id)
-            return JSONResponse(json.loads(text))
-        except Exception as e:
-            logger.error(f'vLLM PD decode error: {e}')
-            return JSONResponse(
-                {'error': f'Decode phase failed: {e}'},
-                status_code=502,
-            )
-
-    async def _stream_generate_pd(
-        self,
-        node_url: str,
-        endpoint: str,
-        request_data: dict[str, Any],
-        request_id: str,
-    ) -> AsyncIterator[bytes]:
-        """Async generator for vLLM PD streaming with request_id."""
-        try:
-            gen = self.stream_forward_with_request_id(node_url, endpoint, request_data, request_id)
-            async for chunk in gen:
-                yield chunk
-        except Exception as e:
-            logger.error(f'vLLM PD stream error: {e}')
-            error_data = {'error': f'Stream failed: {e}'}
-            yield json.dumps(error_data).encode() + b'\n'
+    def _build_two_stage_executor(self) -> VLLMTwoStagePDExecutor:
+        """Build the configured two-stage executor."""
+        adapter = VLLMKVTransferAdapter()
+        selector = VLLMPairSelector()
+        return VLLMTwoStagePDExecutor(
+            backend=self,
+            adapter=adapter,
+            pair_selector=selector,
+        )
