@@ -10,8 +10,8 @@ import time
 from typing import Optional
 
 from dlrouter.logger import get_logger
-from dlrouter.models.node import NodeStatus
 from dlrouter.routing.base import BaseRoutingStrategy
+
 
 logger = get_logger('dlrouter.prefix_cache')
 
@@ -67,10 +67,9 @@ class PrefixCacheTrie:
                     break
                 current = current.children[char]
                 for node_url in list(current.nodes.keys()):
-                    if node_url in candidate_set:
-                        if depth + 1 > best_depth:
-                            best_depth = depth + 1
-                            best_node = node_url
+                    if node_url in candidate_set and depth + 1 > best_depth:
+                        best_depth = depth + 1
+                        best_node = node_url
             if best_node:
                 current.nodes[best_node] = time.time()
         return best_node
@@ -169,47 +168,46 @@ class PrefixCacheStrategy(BaseRoutingStrategy):
 
     def _select_least_loaded_node(self, candidates: dict) -> str:
         """Select the node with minimum unfinished requests.
-        
+
         Uses round-robin as tie-breaker when all nodes have same load.
-        
+
         Args:
             candidates: Dict of node_url -> NodeStatus
-            
+
         Returns:
             Selected node URL with minimum load.
         """
         if not candidates:
-            raise ValueError("No candidates available")
-        
+            raise ValueError('No candidates available')
+
         candidate_list = list(candidates.items())
-        
+
         # Find minimum unfinished count
         min_unfinished = min(status.unfinished for _, status in candidate_list)
-        
+
         # Get all nodes with minimum unfinished count
-        min_load_nodes = [
-            (url, status) for url, status in candidate_list 
-            if status.unfinished == min_unfinished
-        ]
-        
+        min_load_nodes = [(url, status) for url, status in candidate_list if status.unfinished == min_unfinished]
+
         # If multiple nodes have same minimum load, use round-robin
         if len(min_load_nodes) > 1:
             self._rr_counter += 1
             selected_idx = self._rr_counter % len(min_load_nodes)
             selected_url, selected_status = min_load_nodes[selected_idx]
-            logger.info(f'Load balancing: {len(min_load_nodes)} nodes with same load ({min_unfinished}), '
-                       f'using round-robin index {selected_idx}')
+            logger.info(
+                f'Load balancing: {len(min_load_nodes)} nodes with same load ({min_unfinished}), '
+                f'using round-robin index {selected_idx}'
+            )
         else:
             selected_url, selected_status = min_load_nodes[0]
-        
+
         # Log all nodes' load info
         load_info = [
-            f"{url}(unfinished={status.unfinished}, latency={sum(status.latency)/len(status.latency) if status.latency else 0:.3f}s)"
+            f'{url}(unfinished={status.unfinished}, latency={sum(status.latency) / len(status.latency) if status.latency else 0:.3f}s)'
             for url, status in candidate_list
         ]
         logger.info(f'Load balancing candidates: {load_info}')
         logger.info(f'Selected: {selected_url} (unfinished={selected_status.unfinished})')
-        
+
         return selected_url
 
     def update_cache(self, prompt: str, node_url: str) -> None:

@@ -288,7 +288,7 @@ Request ────► Prefill (max_tokens=1) ──► P Node
 This project draws inspiration from the following open-source projects:
 
 - **[LMDeploy](https://github.com/InternLM/lmdeploy)** — The proxy implementation in `lmdeploy/serve/proxy/proxy.py` provided valuable reference for the routing architecture and PD disaggregation support.
-- **[vLLM](https://github.com/vllm-project/vllm)** — The implementation of load balancing policies such as cache_aware in VLLM routers provides us with many references.
+- **[vLLM Router](https://github.com/vllm-project/router)** — The implementation of load balancing policies such as cache_aware in VLLM routers provides us with many references.
 
 We extend our sincere thanks to the developers and contributors of these projects for their excellent work in the LLM inference ecosystem.
 
