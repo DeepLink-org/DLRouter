@@ -32,7 +32,7 @@ from typing import Any
 import uvicorn
 
 from dlrouter.api.app import create_app
-from dlrouter.backends.factory import get_backend_class
+from dlrouter.backends.factory import get_backend_definition
 from dlrouter.config import RouterConfig, SSLConfig
 from dlrouter.constants import (
     BackendType,
@@ -145,7 +145,7 @@ def add_backend_args(
         backend_type: Backend type string (e.g., 'lmdeploy', 'vllm').
     """
     try:
-        backend_cls = get_backend_class(BackendType(backend_type))
+        definition = get_backend_definition(BackendType(backend_type))
     except ValueError:
         return  # Unknown backend, skip
 
@@ -153,7 +153,7 @@ def add_backend_args(
         f'{backend_type.upper()} options',
     )
 
-    for arg in backend_cls.get_cli_args():
+    for arg in definition.get_cli_args():
         kwargs: dict[str, Any] = {
             'default': arg.default,
             'help': arg.help,
@@ -195,11 +195,11 @@ def extract_backend_config(
         Dict of backend-specific configuration.
     """
     try:
-        backend_cls = get_backend_class(BackendType(backend_type))
+        definition = get_backend_definition(BackendType(backend_type))
     except ValueError:
         return {}
 
-    backend_arg_names = [a.name for a in backend_cls.get_cli_args()]
+    backend_arg_names = [a.name for a in definition.get_cli_args()]
     return {k: getattr(args, k) for k in backend_arg_names if hasattr(args, k)}
 
 

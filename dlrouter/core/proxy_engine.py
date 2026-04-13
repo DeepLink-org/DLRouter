@@ -5,12 +5,13 @@ Backend-specific PD logic is delegated to the backend's handle_pd_request().
 """
 
 import json
-from typing import Any, Optional, Union
+from typing import TYPE_CHECKING, Any, Optional, Union
 
 from fastapi import BackgroundTasks
 from fastapi.responses import JSONResponse, StreamingResponse
 from starlette.requests import Request
 
+from dlrouter.backends.base import PDRequestContext
 from dlrouter.constants import (
     ERROR_MESSAGES,
     EngineRole,
@@ -27,6 +28,10 @@ from dlrouter.models.protocol import (
 from dlrouter.utils.request_key import extract_request_key
 
 
+if TYPE_CHECKING:
+    from dlrouter.core.service_discovery.base import BaseServiceDiscovery
+
+
 logger = get_logger('dlrouter.proxy_engine')
 
 
@@ -40,7 +45,7 @@ class ProxyEngine:
     def __init__(
         self,
         node_manager: NodeManager,
-        service_discovery: Optional[Any] = None,
+        service_discovery: Optional['BaseServiceDiscovery'] = None,
     ) -> None:
         self.manager = node_manager
         self._service_discovery = service_discovery
@@ -151,123 +156,26 @@ class ProxyEngine:
     ):
         """Handle request in DistServe PD mode.
 
-        Delegates to backend.handle_pd_request() if service discovery is available,
-        otherwise falls back to LMDeploy PD logic.
-
         Returns:
             StreamingResponse or JSONResponse.
         """
-        # If backend has service discovery, delegate to backend's PD handler
-        if self._service_discovery is not None:
+        try:
             return await self.backend.handle_pd_request(
                 request_data,
                 model_name,
                 endpoint,
                 stream,
-                self._service_discovery,
+                PDRequestContext(
+                    node_manager=self.manager,
+                    service_discovery=self._service_discovery,
+                    request_key=request_key,
+                ),
             )
-
-        # Otherwise use LMDeploy PD logic
-        return await self.handle_lmdeploy_pd(
-            request_data,
-            model_name,
-            endpoint,
-            stream,
-            request_key,
-        )
-
-    async def handle_lmdeploy_pd(
-        self,
-        request_data: dict[str, Any],
-        model_name: str,
-        endpoint: str,
-        stream: bool = False,
-        request_key: Optional[str] = None,
-    ):
-        """Handle request in LMDeploy PD mode.
-
-        1. Send prefill request to P node
-        2. Establish PD connection if needed
-        3. Send decode request to D node with
-           migration info
-
-        Returns:
-            StreamingResponse or JSONResponse.
-        """
-        if not self.backend.supports_pd_disagg():
+        except NotImplementedError:
             return JSONResponse(
                 {'error': ('Current backend does not support PD disaggregation')},
                 status_code=400,
             )
-
-        pd_cfg = getattr(self.backend, 'pd_config', None)
-        dummy_prefill = pd_cfg.dummy_prefill if pd_cfg else False
-
-        # Prefill phase
-        prefill_info = {}
-        p_url = 'dummy:dummy'
-        if not dummy_prefill:
-            p_url = self.manager.get_node_url(
-                model_name,
-                EngineRole.PREFILL,
-                request_key,
-            )
-            if not p_url:
-                return self._model_not_found_response(model_name)
-            logger.info(f'Prefill dispatched to {p_url}')
-            start_p = self.manager.pre_call(p_url)
-            prefill_info = (await self.backend.prefill_request(p_url, endpoint, request_data)) or {}
-            self.manager.post_call(p_url, start_p)
-
-        # Decode phase
-        d_url = self.manager.get_node_url(model_name, EngineRole.DECODE, request_key)
-        if not d_url:
-            return self._model_not_found_response(model_name)
-        logger.info(f'Decode dispatched to {d_url}')
-
-        # PD connection
-        if not dummy_prefill and not self.backend.is_connected_pd(p_url, d_url):
-            await self.backend.connect_pd(p_url, d_url)
-
-        # Add prefill url for migration
-        request_data['_prefill_url'] = p_url
-
-        start_d = self.manager.pre_call(d_url)
-        if not dummy_prefill and prefill_info.get('id'):
-            self.backend.shelf_prefill_session(p_url, d_url, prefill_info['id'])
-
-        try:
-            result = await self.backend.decode_request(
-                d_url,
-                endpoint,
-                request_data,
-                prefill_info,
-                stream=stream,
-            )
-        except Exception as e:
-            logger.error(f'Decode error: {e}')
-            self.manager.post_call(d_url, start_d)
-            return JSONResponse(
-                self._error_json(ErrorCode.BACKEND_ERROR),
-                status_code=502,
-            )
-
-        if stream:
-            bg = BackgroundTasks()
-            bg.add_task(self.manager.post_call, d_url, start_d)
-            resp = StreamingResponse(
-                result,
-                background=bg,
-                media_type='text/event-stream',
-            )
-        else:
-            self.manager.post_call(d_url, start_d)
-            resp = JSONResponse(json.loads(result))
-
-        if not dummy_prefill and prefill_info.get('id'):
-            self.backend.unshelf_prefill_session(p_url, d_url, prefill_info['id'])
-
-        return resp
 
     # -- Unified dispatch --
 

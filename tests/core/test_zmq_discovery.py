@@ -1,4 +1,4 @@
-"""Tests for ZMQServiceDiscovery."""
+"""Tests for ZMQHeartbeatDiscovery."""
 
 import time
 from unittest.mock import MagicMock, patch
@@ -6,7 +6,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from dlrouter.constants import EngineRole
-from dlrouter.core.zmq_discovery import ZMQServiceDiscovery
+from dlrouter.core.service_discovery import NodeInfo, ZMQHeartbeatDiscovery
 from dlrouter.models.node import NodeStatus
 
 
@@ -17,7 +17,7 @@ from dlrouter.models.node import NodeStatus
 
 class TestInit:
     def test_default_values(self):
-        discovery = ZMQServiceDiscovery()
+        discovery = ZMQHeartbeatDiscovery()
         assert discovery._host == '0.0.0.0'
         assert discovery._port == 30001
         assert discovery._ping_timeout == 5
@@ -26,7 +26,7 @@ class TestInit:
         assert discovery._models == []
 
     def test_custom_values(self):
-        discovery = ZMQServiceDiscovery(
+        discovery = ZMQHeartbeatDiscovery(
             host='127.0.0.1',
             port=40001,
             ping_timeout_seconds=10,
@@ -37,14 +37,14 @@ class TestInit:
 
     def test_port_zero_raises(self):
         with pytest.raises(ValueError, match='Port cannot be 0'):
-            ZMQServiceDiscovery(port=0)
+            ZMQHeartbeatDiscovery(port=0)
 
     def test_init_with_node_manager_and_models(self):
         """Test initialization with node_manager and models (new feature)."""
         mock_node_manager = MagicMock()
         models = ['kimi-k2.5', 'qwen-72b']
 
-        discovery = ZMQServiceDiscovery(
+        discovery = ZMQHeartbeatDiscovery(
             node_manager=mock_node_manager,
             models=models,
         )
@@ -60,45 +60,35 @@ class TestInit:
 
 class TestRegistration:
     def test_register_prefill_instance(self):
-        discovery = ZMQServiceDiscovery()
-        future_time = time.time() + 100
-
-        # Manually register a prefill instance
-        with discovery._prefill_lock:
-            discovery._prefill_instances['10.0.0.1:8000'] = (
-                '10.0.0.1:30001',
-                future_time,
-            )
+        discovery = ZMQHeartbeatDiscovery()
+        discovery._register_prefill('10.0.0.1:8000', '10.0.0.1:30001')
 
         assert discovery.get_prefill_count() == 1
-        instances = discovery.prefill_instances
-        assert '10.0.0.1:8000' in instances
-        assert instances['10.0.0.1:8000'][0] == '10.0.0.1:30001'
+        instances = discovery.get_prefill_instances()
+        assert len(instances) == 1
+        assert instances[0].http_address == '10.0.0.1:8000'
+        assert instances[0].zmq_address == '10.0.0.1:30001'
 
     def test_register_decode_instance(self):
-        discovery = ZMQServiceDiscovery()
-        future_time = time.time() + 100
-
-        # Manually register a decode instance
-        with discovery._decode_lock:
-            discovery._decode_instances['10.0.0.2:8000'] = (
-                '10.0.0.2:30001',
-                future_time,
-            )
+        discovery = ZMQHeartbeatDiscovery()
+        discovery._register_decode('10.0.0.2:8000', '10.0.0.2:30001')
 
         assert discovery.get_decode_count() == 1
-        instances = discovery.decode_instances
-        assert '10.0.0.2:8000' in instances
-        assert instances['10.0.0.2:8000'][0] == '10.0.0.2:30001'
+        instances = discovery.get_decode_instances()
+        assert len(instances) == 1
+        assert instances[0].http_address == '10.0.0.2:8000'
+        assert instances[0].zmq_address == '10.0.0.2:30001'
 
     def test_expired_instances_removed(self):
-        discovery = ZMQServiceDiscovery()
+        discovery = ZMQHeartbeatDiscovery()
         past_time = time.time() - 10  # Already expired
 
         with discovery._prefill_lock:
-            discovery._prefill_instances['expired:8000'] = (
-                'expired:30001',
-                past_time,
+            discovery._prefill_instances['expired:8000'] = NodeInfo(
+                http_address='expired:8000',
+                zmq_address='expired:30001',
+                role=EngineRole.PREFILL,
+                expiration=past_time,
             )
 
         # get_prefill_count triggers cleanup
@@ -112,94 +102,53 @@ class TestRegistration:
 
 class TestSelection:
     def test_select_prefill_instance_round_robin(self):
-        discovery = ZMQServiceDiscovery()
-        future_time = time.time() + 100
+        discovery = ZMQHeartbeatDiscovery()
+        discovery._register_prefill('10.0.0.1:8000', '10.0.0.1:30001')
+        discovery._register_prefill('10.0.0.2:8000', '10.0.0.2:30001')
 
-        # Add two prefill instances
-        with discovery._prefill_lock:
-            discovery._prefill_instances['10.0.0.1:8000'] = (
-                '10.0.0.1:30001',
-                future_time,
-            )
-            discovery._prefill_instances['10.0.0.2:8000'] = (
-                '10.0.0.2:30001',
-                future_time,
-            )
-
-        result = discovery.select_prefill_instance()
+        result = discovery.select_prefill()
         assert result is not None
-        assert result[0] in ['10.0.0.1:8000', '10.0.0.2:8000']
+        assert result.http_address in ['10.0.0.1:8000', '10.0.0.2:8000']
 
     def test_select_decode_instance_round_robin(self):
-        discovery = ZMQServiceDiscovery()
-        future_time = time.time() + 100
+        discovery = ZMQHeartbeatDiscovery()
+        discovery._register_decode('10.0.0.3:8000', '10.0.0.3:30001')
+        discovery._register_decode('10.0.0.4:8000', '10.0.0.4:30001')
 
-        # Add two decode instances
-        with discovery._decode_lock:
-            discovery._decode_instances['10.0.0.3:8000'] = (
-                '10.0.0.3:30001',
-                future_time,
-            )
-            discovery._decode_instances['10.0.0.4:8000'] = (
-                '10.0.0.4:30001',
-                future_time,
-            )
-
-        result = discovery.select_decode_instance()
+        result = discovery.select_decode()
         assert result is not None
-        assert result[0] in ['10.0.0.3:8000', '10.0.0.4:8000']
+        assert result.http_address in ['10.0.0.3:8000', '10.0.0.4:8000']
 
     def test_select_prefill_returns_none_when_empty(self):
-        discovery = ZMQServiceDiscovery()
-        assert discovery.select_prefill_instance() is None
+        discovery = ZMQHeartbeatDiscovery()
+        assert discovery.select_prefill() is None
 
     def test_select_decode_returns_none_when_empty(self):
-        discovery = ZMQServiceDiscovery()
-        assert discovery.select_decode_instance() is None
+        discovery = ZMQHeartbeatDiscovery()
+        assert discovery.select_decode() is None
 
     def test_select_pd_pair(self):
-        discovery = ZMQServiceDiscovery()
-        future_time = time.time() + 100
-
-        # Add instances
-        with discovery._prefill_lock:
-            discovery._prefill_instances['10.0.0.1:8000'] = (
-                '10.0.0.1:30001',
-                future_time,
-            )
-        with discovery._decode_lock:
-            discovery._decode_instances['10.0.0.2:8000'] = (
-                '10.0.0.2:30001',
-                future_time,
-            )
+        discovery = ZMQHeartbeatDiscovery()
+        discovery._register_prefill('10.0.0.1:8000', '10.0.0.1:30001')
+        discovery._register_decode('10.0.0.2:8000', '10.0.0.2:30001')
 
         result = discovery.select_pd_pair()
         assert result is not None
         prefill, decode = result
-        assert prefill == ('10.0.0.1:8000', '10.0.0.1:30001')
-        assert decode == ('10.0.0.2:8000', '10.0.0.2:30001')
+        assert prefill.http_address == '10.0.0.1:8000'
+        assert prefill.zmq_address == '10.0.0.1:30001'
+        assert decode.http_address == '10.0.0.2:8000'
+        assert decode.zmq_address == '10.0.0.2:30001'
 
     def test_select_pd_pair_returns_none_without_prefill(self):
-        discovery = ZMQServiceDiscovery()
-        future_time = time.time() + 100
-
-        with discovery._decode_lock:
-            discovery._decode_instances['10.0.0.2:8000'] = (
-                '10.0.0.2:30001',
-                future_time,
-            )
+        discovery = ZMQHeartbeatDiscovery()
+        discovery._register_decode('10.0.0.2:8000', '10.0.0.2:30001')
 
         assert discovery.select_pd_pair() is None
 
     def test_select_pd_pair_returns_none_without_decode(self):
-        discovery = ZMQServiceDiscovery()
-        future_time = time.time() + 100
-
-        with discovery._prefill_lock:
-            discovery._prefill_instances['10.0.0.1:8000'] = (
-                '10.0.0.1:30001',
-                future_time,
-            )
+        discovery = ZMQHeartbeatDiscovery()
+        discovery._register_prefill('10.0.0.1:8000', '10.0.0.1:30001')
 
         assert discovery.select_pd_pair() is None
 
@@ -211,11 +160,21 @@ class TestSelection:
 
 class TestRequestIdBuilding:
     def test_build_request_id_format(self):
-        discovery = ZMQServiceDiscovery()
+        discovery = ZMQHeartbeatDiscovery()
+        prefill = NodeInfo(
+            http_address='10.0.0.1:8000',
+            zmq_address='10.0.0.1:30001',
+            role=EngineRole.PREFILL,
+        )
+        decode = NodeInfo(
+            http_address='10.0.0.2:8000',
+            zmq_address='10.0.0.2:30001',
+            role=EngineRole.DECODE,
+        )
         request_id = discovery.build_request_id(
-            prefill_zmq_addr='10.0.0.1:30001',
-            decode_zmq_addr='10.0.0.2:30001',
-            base_id='abc123',
+            prefill,
+            decode,
+            'abc123',
         )
 
         assert '___prefill_addr_10.0.0.1:30001' in request_id
@@ -223,9 +182,19 @@ class TestRequestIdBuilding:
         assert 'abc123' in request_id
 
     def test_build_request_id_uniqueness(self):
-        discovery = ZMQServiceDiscovery()
-        id1 = discovery.build_request_id('p1', 'd1', 'uuid1')
-        id2 = discovery.build_request_id('p1', 'd1', 'uuid2')
+        discovery = ZMQHeartbeatDiscovery()
+        prefill = NodeInfo(
+            http_address='10.0.0.1:8000',
+            zmq_address='p1',
+            role=EngineRole.PREFILL,
+        )
+        decode = NodeInfo(
+            http_address='10.0.0.2:8000',
+            zmq_address='d1',
+            role=EngineRole.DECODE,
+        )
+        id1 = discovery.build_request_id(prefill, decode, 'uuid1')
+        id2 = discovery.build_request_id(prefill, decode, 'uuid2')
         assert id1 != id2
 
 
@@ -236,19 +205,9 @@ class TestRequestIdBuilding:
 
 class TestStatus:
     def test_get_status(self):
-        discovery = ZMQServiceDiscovery()
-        future_time = time.time() + 100
-
-        with discovery._prefill_lock:
-            discovery._prefill_instances['10.0.0.1:8000'] = (
-                '10.0.0.1:30001',
-                future_time,
-            )
-        with discovery._decode_lock:
-            discovery._decode_instances['10.0.0.2:8000'] = (
-                '10.0.0.2:30001',
-                future_time,
-            )
+        discovery = ZMQHeartbeatDiscovery()
+        discovery._register_prefill('10.0.0.1:8000', '10.0.0.1:30001')
+        discovery._register_decode('10.0.0.2:8000', '10.0.0.2:30001')
 
         status = discovery.get_status()
         assert status['running'] is False
@@ -265,10 +224,12 @@ class TestStatus:
 
 class TestStartStop:
     def test_start_requires_zmq(self):
-        discovery = ZMQServiceDiscovery()
+        discovery = ZMQHeartbeatDiscovery()
 
-        with patch.dict('sys.modules', {'zmq': None}), pytest.raises(ImportError):
+        with patch.dict('sys.modules', {'zmq': None}):
             discovery.start()
+            discovery._listener_thread.join(timeout=1)
+            assert discovery.running is False
 
     def test_start_requires_msgpack(self):
         mock_zmq = MagicMock()
@@ -276,17 +237,18 @@ class TestStartStop:
         mock_zmq.ROUTER = 1
         mock_zmq.POLLIN = 1
 
-        discovery = ZMQServiceDiscovery()
+        discovery = ZMQHeartbeatDiscovery()
 
         with (
             patch.dict('sys.modules', {'zmq': mock_zmq}),
             patch.dict('sys.modules', {'msgpack': None}),
-            pytest.raises(ImportError),
         ):
             discovery.start()
+            discovery._listener_thread.join(timeout=1)
+            assert discovery.running is False
 
     def test_stop_without_start(self):
-        discovery = ZMQServiceDiscovery()
+        discovery = ZMQHeartbeatDiscovery()
         # Should not raise
         discovery.stop()
         assert discovery._running is False
@@ -300,7 +262,7 @@ class TestStartStop:
             pytest.skip('zmq or msgpack not installed')
 
         # Use a different port to avoid conflicts
-        discovery = ZMQServiceDiscovery(port=39999)
+        discovery = ZMQHeartbeatDiscovery(port=39999)
         discovery.start()
         assert discovery._running is True
         assert discovery._listener_thread is not None
@@ -316,31 +278,37 @@ class TestStartStop:
 
 class TestMessageHandling:
     def test_register_prefill_via_internal_method(self):
-        discovery = ZMQServiceDiscovery()
-        expiration = time.time() + 100
-
-        discovery._register_prefill('10.0.0.1:8000', '10.0.0.1:30001', expiration)
+        discovery = ZMQHeartbeatDiscovery()
+        discovery._register_prefill('10.0.0.1:8000', '10.0.0.1:30001')
 
         assert discovery.get_prefill_count() == 1
-        assert '10.0.0.1:8000' in discovery.prefill_instances
+        assert discovery.get_prefill_instances()[0].http_address == '10.0.0.1:8000'
 
     def test_register_decode_via_internal_method(self):
-        discovery = ZMQServiceDiscovery()
-        expiration = time.time() + 100
-
-        discovery._register_decode('10.0.0.2:8000', '10.0.0.2:30001', expiration)
+        discovery = ZMQHeartbeatDiscovery()
+        discovery._register_decode('10.0.0.2:8000', '10.0.0.2:30001')
 
         assert discovery.get_decode_count() == 1
-        assert '10.0.0.2:8000' in discovery.decode_instances
+        assert discovery.get_decode_instances()[0].http_address == '10.0.0.2:8000'
 
     def test_remove_expired_removes_old_instances(self):
-        discovery = ZMQServiceDiscovery()
+        discovery = ZMQHeartbeatDiscovery()
         past = time.time() - 10
         future = time.time() + 100
 
         with discovery._prefill_lock:
-            discovery._prefill_instances['expired:8000'] = ('expired:30001', past)
-            discovery._prefill_instances['valid:8000'] = ('valid:30001', future)
+            discovery._prefill_instances['expired:8000'] = NodeInfo(
+                http_address='expired:8000',
+                zmq_address='expired:30001',
+                role=EngineRole.PREFILL,
+                expiration=past,
+            )
+            discovery._prefill_instances['valid:8000'] = NodeInfo(
+                http_address='valid:8000',
+                zmq_address='valid:30001',
+                role=EngineRole.PREFILL,
+                expiration=future,
+            )
             discovery._remove_expired(discovery._prefill_instances)
 
         assert 'expired:8000' not in discovery._prefill_instances
@@ -353,20 +321,18 @@ class TestMessageHandling:
 
 
 class TestNodeManagerSync:
-    """Tests for ZMQ discovery to NodeManager sync feature."""
+    """Tests for ZMQ heartbeat discovery to NodeManager sync feature."""
 
     def test_sync_prefill_to_node_manager(self):
         """Test that prefill instance is synced to node_manager on registration."""
         mock_node_manager = MagicMock()
         models = ['kimi-k2.5']
 
-        discovery = ZMQServiceDiscovery(
+        discovery = ZMQHeartbeatDiscovery(
             node_manager=mock_node_manager,
             models=models,
         )
-        expiration = time.time() + 100
-
-        discovery._register_prefill('10.0.0.1:8000', '10.0.0.1:30001', expiration)
+        discovery._register_prefill('10.0.0.1:8000', '10.0.0.1:30001')
 
         # Verify node_manager.add was called
         mock_node_manager.add.assert_called_once()
@@ -381,13 +347,11 @@ class TestNodeManagerSync:
         mock_node_manager = MagicMock()
         models = ['kimi-k2.5', 'qwen-72b']
 
-        discovery = ZMQServiceDiscovery(
+        discovery = ZMQHeartbeatDiscovery(
             node_manager=mock_node_manager,
             models=models,
         )
-        expiration = time.time() + 100
-
-        discovery._register_decode('10.0.0.2:8000', '10.0.0.2:30001', expiration)
+        discovery._register_decode('10.0.0.2:8000', '10.0.0.2:30001')
 
         # Verify node_manager.add was called
         mock_node_manager.add.assert_called_once()
@@ -399,25 +363,22 @@ class TestNodeManagerSync:
 
     def test_sync_skipped_when_no_node_manager(self):
         """Test that sync is skipped when node_manager is None."""
-        discovery = ZMQServiceDiscovery()  # No node_manager
-        expiration = time.time() + 100
+        discovery = ZMQHeartbeatDiscovery()  # No node_manager
 
         # Should not raise
-        discovery._register_prefill('10.0.0.1:8000', '10.0.0.1:30001', expiration)
-        discovery._register_decode('10.0.0.2:8000', '10.0.0.2:30001', expiration)
+        discovery._register_prefill('10.0.0.1:8000', '10.0.0.1:30001')
+        discovery._register_decode('10.0.0.2:8000', '10.0.0.2:30001')
 
     def test_sync_handles_url_with_http_prefix(self):
         """Test that URLs with http:// prefix are handled correctly."""
         mock_node_manager = MagicMock()
 
-        discovery = ZMQServiceDiscovery(
+        discovery = ZMQHeartbeatDiscovery(
             node_manager=mock_node_manager,
             models=['test-model'],
         )
-        expiration = time.time() + 100
-
         # URL already has http:// prefix
-        discovery._register_prefill('http://10.0.0.1:8000', '10.0.0.1:30001', expiration)
+        discovery._register_prefill('http://10.0.0.1:8000', '10.0.0.1:30001')
 
         call_args = mock_node_manager.add.call_args
         assert call_args[0][0] == 'http://10.0.0.1:8000'  # Should not double-prefix
@@ -425,12 +386,17 @@ class TestNodeManagerSync:
     def test_remove_expired_also_removes_from_node_manager(self):
         """Test that expired instances are removed from node_manager."""
         mock_node_manager = MagicMock()
-        discovery = ZMQServiceDiscovery(node_manager=mock_node_manager)
+        discovery = ZMQHeartbeatDiscovery(node_manager=mock_node_manager)
 
         past = time.time() - 10
 
         with discovery._prefill_lock:
-            discovery._prefill_instances['expired:8000'] = ('expired:30001', past)
+            discovery._prefill_instances['expired:8000'] = NodeInfo(
+                http_address='expired:8000',
+                zmq_address='expired:30001',
+                role=EngineRole.PREFILL,
+                expiration=past,
+            )
             discovery._remove_expired(discovery._prefill_instances)
 
         # Verify node_manager.remove was called for expired instance
@@ -441,11 +407,9 @@ class TestNodeManagerSync:
         mock_node_manager = MagicMock()
         mock_node_manager.add.side_effect = Exception('Node manager error')
 
-        discovery = ZMQServiceDiscovery(
+        discovery = ZMQHeartbeatDiscovery(
             node_manager=mock_node_manager,
             models=['test-model'],
         )
-        expiration = time.time() + 100
-
         # Should not raise despite node_manager error
-        discovery._register_prefill('10.0.0.1:8000', '10.0.0.1:30001', expiration)
+        discovery._register_prefill('10.0.0.1:8000', '10.0.0.1:30001')

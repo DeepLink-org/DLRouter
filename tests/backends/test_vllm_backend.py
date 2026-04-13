@@ -5,9 +5,16 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import aiohttp
 import pytest
 
-from dlrouter.backends.factory import create_backend
-from dlrouter.backends.vllm_backend import VLLMBackend, VLLMPDConfig
-from dlrouter.constants import BackendType
+from dlrouter.backends.base import PDRequestContext
+from dlrouter.backends.factory import create_backend, get_backend_definition
+from dlrouter.backends.lmdeploy import LMDeployBackend
+from dlrouter.backends.vllm import (
+    VLLM_BACKEND_DEFINITION,
+    VLLMBackend,
+    VLLMPDConfig,
+)
+from dlrouter.constants import BackendType, ServiceDiscoveryMode
+from dlrouter.core.service_discovery import NodeInfo
 
 
 NODE_URL = 'http://10.0.0.1:8000'
@@ -74,6 +81,14 @@ class TestFactory:
     def test_creates_vllm_backend(self):
         backend = create_backend(BackendType.VLLM)
         assert isinstance(backend, VLLMBackend)
+
+    def test_uses_vllm_backend_definition(self):
+        backend = create_backend(BackendType.VLLM)
+        definition = get_backend_definition(BackendType.VLLM)
+
+        assert definition is VLLM_BACKEND_DEFINITION
+        assert isinstance(backend, VLLMBackend)
+        assert definition.supports('check_health') is True
 
     def test_does_not_support_pd_disagg(self):
         backend = create_backend(BackendType.VLLM)
@@ -164,7 +179,7 @@ class TestFetchModels:
         mock_resp.raise_for_status = MagicMock()
 
         with patch(
-            'dlrouter.backends.vllm_backend.requests.get',
+            'dlrouter.backends.vllm.backend.requests.get',
             return_value=mock_resp,
         ):
             backend = VLLMBackend()
@@ -178,7 +193,7 @@ class TestFetchModels:
         mock_resp.raise_for_status = MagicMock()
 
         with patch(
-            'dlrouter.backends.vllm_backend.requests.get',
+            'dlrouter.backends.vllm.backend.requests.get',
             return_value=mock_resp,
         ):
             backend = VLLMBackend()
@@ -188,7 +203,7 @@ class TestFetchModels:
 
     def test_connection_error_returns_empty(self):
         with patch(
-            'dlrouter.backends.vllm_backend.requests.get',
+            'dlrouter.backends.vllm.backend.requests.get',
             side_effect=Exception('connection refused'),
         ):
             backend = VLLMBackend()
@@ -405,7 +420,15 @@ class TestCLIArgs:
     def test_get_cli_args_returns_list(self):
         args = VLLMBackend.get_cli_args()
         assert isinstance(args, list)
-        assert len(args) == 4  # zmq_host, zmq_port, zmq_ping_timeout, models
+        assert [arg.name for arg in args] == [
+            'discovery_mode',
+            'zmq_host',
+            'zmq_port',
+            'zmq_ping_timeout',
+            'prefill_urls',
+            'decode_urls',
+            'models',
+        ]
 
     def test_cli_args_have_required_fields(self):
         args = VLLMBackend.get_cli_args()
@@ -460,6 +483,8 @@ class TestParseConfig:
 
 class TestCreateServiceDiscovery:
     def test_creates_zmq_discovery(self):
+        from dlrouter.core.service_discovery import ZMQHeartbeatDiscovery
+
         backend = VLLMBackend()
         mock_node_manager = MagicMock()
         backend_config = {
@@ -470,14 +495,12 @@ class TestCreateServiceDiscovery:
         }
 
         discovery = backend.create_service_discovery(
+            ServiceDiscoveryMode.HEARTBEAT,
             backend_config,
             mock_node_manager,
         )
 
-        # Verify it's a ZMQServiceDiscovery instance
-        from dlrouter.core.zmq_discovery import ZMQServiceDiscovery
-
-        assert isinstance(discovery, ZMQServiceDiscovery)
+        assert isinstance(discovery, ZMQHeartbeatDiscovery)
         assert discovery._host == '127.0.0.1'
         assert discovery._port == 30002
         assert discovery._ping_timeout == 10
@@ -485,26 +508,32 @@ class TestCreateServiceDiscovery:
         assert discovery._node_manager is mock_node_manager
 
     def test_creates_with_default_config(self):
+        from dlrouter.core.service_discovery import ZMQHeartbeatDiscovery
+
         backend = VLLMBackend()
         mock_node_manager = MagicMock()
 
-        discovery = backend.create_service_discovery({}, mock_node_manager)
+        discovery = backend.create_service_discovery(
+            ServiceDiscoveryMode.HEARTBEAT,
+            {},
+            mock_node_manager,
+        )
 
-        from dlrouter.core.zmq_discovery import ZMQServiceDiscovery
-
-        assert isinstance(discovery, ZMQServiceDiscovery)
+        assert isinstance(discovery, ZMQHeartbeatDiscovery)
         assert discovery._host == '0.0.0.0'
         assert discovery._port == 30001
         assert discovery._ping_timeout == 5
         assert discovery._models == []
 
     def test_lmdeploy_backend_returns_none(self):
-        from dlrouter.backends.lmdeploy_backend import LMDeployBackend
-
         backend = LMDeployBackend()
         mock_node_manager = MagicMock()
 
-        discovery = backend.create_service_discovery({}, mock_node_manager)
+        discovery = backend.create_service_discovery(
+            ServiceDiscoveryMode.HEARTBEAT,
+            {},
+            mock_node_manager,
+        )
 
         assert discovery is None
 
@@ -515,6 +544,19 @@ class TestCreateServiceDiscovery:
 
 
 class TestHandlePDRequest:
+    @staticmethod
+    def _make_pd_pair():
+        return (
+            NodeInfo(
+                http_address='10.0.0.1:8200',
+                zmq_address='10.0.0.1:21001',
+            ),
+            NodeInfo(
+                http_address='10.0.0.2:8200',
+                zmq_address='10.0.0.2:22001',
+            ),
+        )
+
     @pytest.mark.asyncio
     async def test_handle_pd_request_no_pd_pair(self):
         """Test handle_pd_request when no P/D instances available."""
@@ -527,7 +569,7 @@ class TestHandlePDRequest:
             'test-model',
             '/v1/chat/completions',
             stream=False,
-            service_discovery=mock_discovery,
+            context=PDRequestContext(node_manager=MagicMock(), service_discovery=mock_discovery),
         )
 
         assert response.status_code == 503
@@ -538,10 +580,7 @@ class TestHandlePDRequest:
         """Test handle_pd_request when prefill phase fails."""
         backend = VLLMBackend()
         mock_discovery = MagicMock()
-        mock_discovery.select_pd_pair.return_value = (
-            ('http://10.0.0.1:8200', '10.0.0.1:21001'),
-            ('http://10.0.0.2:8200', '10.0.0.2:22001'),
-        )
+        mock_discovery.select_pd_pair.return_value = self._make_pd_pair()
         mock_discovery.build_request_id.return_value = 'test-request-id'
 
         # Mock stream_forward_with_request_id to raise exception
@@ -556,7 +595,7 @@ class TestHandlePDRequest:
             'test-model',
             '/v1/chat/completions',
             stream=False,
-            service_discovery=mock_discovery,
+            context=PDRequestContext(node_manager=MagicMock(), service_discovery=mock_discovery),
         )
 
         assert response.status_code == 502
@@ -566,10 +605,7 @@ class TestHandlePDRequest:
         """Test handle_pd_request success (non-streaming)."""
         backend = VLLMBackend()
         mock_discovery = MagicMock()
-        mock_discovery.select_pd_pair.return_value = (
-            ('http://10.0.0.1:8200', '10.0.0.1:21001'),
-            ('http://10.0.0.2:8200', '10.0.0.2:22001'),
-        )
+        mock_discovery.select_pd_pair.return_value = self._make_pd_pair()
         mock_discovery.build_request_id.return_value = 'test-request-id'
 
         # Mock prefill (stream_forward_with_request_id)
@@ -588,7 +624,7 @@ class TestHandlePDRequest:
             'test-model',
             '/v1/chat/completions',
             stream=False,
-            service_discovery=mock_discovery,
+            context=PDRequestContext(node_manager=MagicMock(), service_discovery=mock_discovery),
         )
 
         assert response.status_code == 200
@@ -602,10 +638,7 @@ class TestHandlePDRequest:
 
         backend = VLLMBackend()
         mock_discovery = MagicMock()
-        mock_discovery.select_pd_pair.return_value = (
-            ('http://10.0.0.1:8200', '10.0.0.1:21001'),
-            ('http://10.0.0.2:8200', '10.0.0.2:22001'),
-        )
+        mock_discovery.select_pd_pair.return_value = self._make_pd_pair()
         mock_discovery.build_request_id.return_value = 'test-request-id'
 
         # Mock prefill
@@ -619,7 +652,7 @@ class TestHandlePDRequest:
             'test-model',
             '/v1/chat/completions',
             stream=True,
-            service_discovery=mock_discovery,
+            context=PDRequestContext(node_manager=MagicMock(), service_discovery=mock_discovery),
         )
 
         assert isinstance(response, StreamingResponse)
@@ -630,10 +663,7 @@ class TestHandlePDRequest:
         """Test handle_pd_request when decode phase fails (non-streaming)."""
         backend = VLLMBackend()
         mock_discovery = MagicMock()
-        mock_discovery.select_pd_pair.return_value = (
-            ('http://10.0.0.1:8200', '10.0.0.1:21001'),
-            ('http://10.0.0.2:8200', '10.0.0.2:22001'),
-        )
+        mock_discovery.select_pd_pair.return_value = self._make_pd_pair()
         mock_discovery.build_request_id.return_value = 'test-request-id'
 
         # Mock prefill success
@@ -652,7 +682,7 @@ class TestHandlePDRequest:
             'test-model',
             '/v1/chat/completions',
             stream=False,
-            service_discovery=mock_discovery,
+            context=PDRequestContext(node_manager=MagicMock(), service_discovery=mock_discovery),
         )
 
         assert response.status_code == 502

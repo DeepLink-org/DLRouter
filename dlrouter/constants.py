@@ -53,6 +53,23 @@ class EngineRole(enum.Enum):
     DECODE = enum.auto()
 
 
+class ServiceDiscoveryMode(str, enum.Enum):
+    """Service discovery modes for PD disaggregation.
+
+    Based on research document analysis, only two modes exist:
+    - STATIC: Manual configuration (SGLang mini_lb, vLLM disagg_proxy_demo, Mooncake, NIXL)
+      Proxy gets P/D list from CLI args, does NOT read from registry.
+    - HEARTBEAT: Instance-initiated registration (vLLM P2P NCCL xPyD Router)
+      P/D instances send heartbeat to Router with http+ZMQ addresses.
+
+    Note: Mooncake's etcd is for KV transfer layer (buffer discovery, handshake),
+    NOT for Proxy to discover P/D nodes. Proxy still uses static config.
+    """
+
+    STATIC = 'static'  # 手动配置节点列表 (绝大多数场景)
+    HEARTBEAT = 'heartbeat'  # 心跳注册模式 (仅 vLLM P2P NCCL)
+
+
 class ErrorCode(enum.IntEnum):
     """Error codes."""
 
