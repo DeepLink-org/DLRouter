@@ -22,6 +22,7 @@ logger = get_logger('dlrouter.service_discovery.heartbeat')
 
 # Default ping timeout in seconds
 DEFAULT_PING_TIMEOUT_SECONDS = 5
+DEFAULT_MODEL_FETCH_RETRY_SECONDS = 5
 
 
 class HeartbeatServiceDiscovery(BaseServiceDiscovery):
@@ -51,14 +52,7 @@ class HeartbeatServiceDiscovery(BaseServiceDiscovery):
         super().__init__(node_manager, models)
 
         self._ping_timeout = ping_timeout_seconds
-
-        # Instance registries: http_address -> NodeInfo
-        self._prefill_instances: dict[str, NodeInfo] = {}
-        self._decode_instances: dict[str, NodeInfo] = {}
-
-        # Thread-safe access
-        self._prefill_lock = threading.Lock()
-        self._decode_lock = threading.Lock()
+        self._model_fetch_retry_after: dict[str, float] = {}
 
         # Counter for round-robin selection
         self._counter = 0
@@ -66,6 +60,22 @@ class HeartbeatServiceDiscovery(BaseServiceDiscovery):
 
         # Background listener thread
         self._listener_thread: Optional[threading.Thread] = None
+
+    def _prepare_new_node_for_registration(self, node: NodeInfo) -> Optional[NodeInfo]:
+        """Throttle failed model fetches for not-yet-registered heartbeat nodes."""
+        node_url = node.to_http_url()
+        now = time.time()
+        retry_after = self._model_fetch_retry_after.get(node_url, 0.0)
+        if retry_after > now:
+            return None
+
+        prepared = self._prepare_node_for_registration(node)
+        if prepared is None:
+            self._model_fetch_retry_after[node_url] = now + DEFAULT_MODEL_FETCH_RETRY_SECONDS
+            return None
+
+        self._model_fetch_retry_after.pop(node_url, None)
+        return prepared
 
     # -- Lifecycle --
 
@@ -120,24 +130,31 @@ class HeartbeatServiceDiscovery(BaseServiceDiscovery):
             zmq_address: ZMQ address from heartbeat (optional).
             metadata: Additional metadata from heartbeat.
         """
+        existing = next((item for item in self.get_prefill_instances() if item.http_address == http_address), None)
+        is_new = existing is None
         expiration = time.time() + self._ping_timeout
         node = NodeInfo(
             http_address=http_address,
             zmq_address=zmq_address,
             role=EngineRole.PREFILL,
-            models=self._models.copy(),
-            metadata=metadata or {},
+            models=existing.models.copy() if existing else self._models.copy(),
+            metadata=metadata if metadata is not None else (existing.metadata.copy() if existing else {}),
             expiration=expiration,
         )
 
-        with self._prefill_lock:
-            is_new = http_address not in self._prefill_instances
-            self._prefill_instances[http_address] = node
-            self._remove_expired(self._prefill_instances)
+        if not is_new:
+            self._registry.upsert(node)
+            self._remove_expired()
+            return
 
-        if is_new:
-            logger.info(f'🔵 Add Prefill [HTTP:{http_address}, ZMQ:{zmq_address}]')
-            self._sync_to_node_manager(node)
+        prepared = self._prepare_new_node_for_registration(node)
+        self._remove_expired()
+        if prepared is None:
+            return
+
+        self._registry.upsert(prepared)
+        logger.info(f'🔵 Add Prefill [HTTP:{http_address}, ZMQ:{zmq_address}]')
+        self._sync_to_node_manager(prepared)
 
     def _register_decode(
         self,
@@ -146,46 +163,49 @@ class HeartbeatServiceDiscovery(BaseServiceDiscovery):
         metadata: Optional[dict[str, Any]] = None,
     ) -> None:
         """Register a decode instance from heartbeat."""
+        existing = next((item for item in self.get_decode_instances() if item.http_address == http_address), None)
+        is_new = existing is None
         expiration = time.time() + self._ping_timeout
         node = NodeInfo(
             http_address=http_address,
             zmq_address=zmq_address,
             role=EngineRole.DECODE,
-            models=self._models.copy(),
-            metadata=metadata or {},
+            models=existing.models.copy() if existing else self._models.copy(),
+            metadata=metadata if metadata is not None else (existing.metadata.copy() if existing else {}),
             expiration=expiration,
         )
 
-        with self._decode_lock:
-            is_new = http_address not in self._decode_instances
-            self._decode_instances[http_address] = node
-            self._remove_expired(self._decode_instances)
+        if not is_new:
+            self._registry.upsert(node)
+            self._remove_expired()
+            return
 
-        if is_new:
-            logger.info(f'🔵 Add Decode [HTTP:{http_address}, ZMQ:{zmq_address}]')
-            self._sync_to_node_manager(node)
+        prepared = self._prepare_new_node_for_registration(node)
+        self._remove_expired()
+        if prepared is None:
+            return
 
-    def _remove_expired(self, instances: dict[str, NodeInfo]) -> None:
-        """Remove expired instances from registry.
+        self._registry.upsert(prepared)
+        logger.info(f'🔵 Add Decode [HTTP:{http_address}, ZMQ:{zmq_address}]')
+        self._sync_to_node_manager(prepared)
 
-        Args:
-            instances: The instance dict to clean (prefill or decode).
-        """
+    def _remove_expired(self) -> None:
+        """Remove expired instances from the unified registry."""
         now = time.time()
-        expired = []
-        for http_addr, node in instances.items():
-            if node.expiration and node.expiration <= now:
-                expired.append((http_addr, node))
+        expired = [node for node in self._registry.get_all_instances() if node.expiration and node.expiration <= now]
 
-        for http_addr, node in expired:
-            instances.pop(http_addr, None)
-            logger.info(f'🔴 Remove expired [HTTP:{http_addr}, ZMQ:{node.zmq_address}]')
+        for node in expired:
+            self._registry.remove(node)
+            self._model_fetch_retry_after.pop(node.to_http_url(), None)
+            logger.info(f'🔴 Remove expired [HTTP:{node.http_address}, ZMQ:{node.zmq_address}]')
             self._remove_from_node_manager(node)
 
     def remove_prefill(self, http_address: str) -> None:
         """Remove a prefill instance explicitly."""
-        with self._prefill_lock:
-            node = self._prefill_instances.pop(http_address, None)
+        node = next((item for item in self.get_prefill_instances() if item.http_address == http_address), None)
+        if node:
+            self._registry.remove(node)
+            self._model_fetch_retry_after.pop(node.to_http_url(), None)
 
         if node:
             logger.info(f'🔴 Remove Prefill [HTTP:{http_address}]')
@@ -193,8 +213,10 @@ class HeartbeatServiceDiscovery(BaseServiceDiscovery):
 
     def remove_decode(self, http_address: str) -> None:
         """Remove a decode instance explicitly."""
-        with self._decode_lock:
-            node = self._decode_instances.pop(http_address, None)
+        node = next((item for item in self.get_decode_instances() if item.http_address == http_address), None)
+        if node:
+            self._registry.remove(node)
+            self._model_fetch_retry_after.pop(node.to_http_url(), None)
 
         if node:
             logger.info(f'🔴 Remove Decode [HTTP:{http_address}]')
@@ -204,53 +226,43 @@ class HeartbeatServiceDiscovery(BaseServiceDiscovery):
 
     def select_prefill(self) -> Optional[NodeInfo]:
         """Select a prefill instance using round-robin."""
-        with self._prefill_lock:
-            self._remove_expired(self._prefill_instances)
-            instances = list(self._prefill_instances.values())
-            if not instances:
-                return None
+        self._remove_expired()
+        instances = self.get_prefill_instances()
+        if not instances:
+            return None
 
-            with self._counter_lock:
-                idx = self._counter % len(instances)
-                self._counter += 1
+        with self._counter_lock:
+            idx = self._counter % len(instances)
+            self._counter += 1
 
-            return instances[idx]
+        return instances[idx]
 
     def select_decode(self) -> Optional[NodeInfo]:
         """Select a decode instance using round-robin."""
-        with self._decode_lock:
-            self._remove_expired(self._decode_instances)
-            instances = list(self._decode_instances.values())
-            if not instances:
-                return None
+        self._remove_expired()
+        instances = self.get_decode_instances()
+        if not instances:
+            return None
 
-            with self._counter_lock:
-                idx = self._counter % len(instances)
+        with self._counter_lock:
+            idx = self._counter % len(instances)
 
-            return instances[idx]
+        return instances[idx]
 
     # -- Query --
 
     def get_prefill_count(self) -> int:
-        """Get number of active prefill instances."""
-        with self._prefill_lock:
-            self._remove_expired(self._prefill_instances)
-            return len(self._prefill_instances)
+        self._remove_expired()
+        return super().get_prefill_count()
 
     def get_decode_count(self) -> int:
-        """Get number of active decode instances."""
-        with self._decode_lock:
-            self._remove_expired(self._decode_instances)
-            return len(self._decode_instances)
+        self._remove_expired()
+        return super().get_decode_count()
 
     def get_prefill_instances(self) -> list[NodeInfo]:
-        """Get list of all active prefill instances."""
-        with self._prefill_lock:
-            self._remove_expired(self._prefill_instances)
-            return list(self._prefill_instances.values())
+        self._remove_expired()
+        return super().get_prefill_instances()
 
     def get_decode_instances(self) -> list[NodeInfo]:
-        """Get list of all active decode instances."""
-        with self._decode_lock:
-            self._remove_expired(self._decode_instances)
-            return list(self._decode_instances.values())
+        self._remove_expired()
+        return super().get_decode_instances()

@@ -1,5 +1,6 @@
 """FastAPI application factory."""
 
+from contextlib import asynccontextmanager
 from typing import Any, Optional
 
 from fastapi import FastAPI, Request
@@ -43,6 +44,16 @@ async def log_validation_error(request: Request, exc: RequestValidationError):
 logger = get_logger('dlrouter.app')
 
 
+def _resolve_distserve_discovery_mode(backend: Any, config: RouterConfig) -> ServiceDiscoveryMode:
+    """Resolve discovery mode for DistServe startup."""
+    pd_config = getattr(backend, 'pd_config', None)
+    if pd_config is not None and hasattr(pd_config, 'discovery_mode'):
+        return pd_config.discovery_mode
+
+    discovery_mode_str = config.backend_config.get('discovery_mode', 'heartbeat')
+    return ServiceDiscoveryMode(discovery_mode_str)
+
+
 def create_app(
     config: RouterConfig = None,
 ) -> FastAPI:
@@ -58,11 +69,25 @@ def create_app(
     if config is None:
         config = RouterConfig()
 
+    @asynccontextmanager
+    async def lifespan(application: FastAPI):
+        health_checker.start()
+        if service_discovery:
+            service_discovery.start()
+        logger.info('DLRouter started.')
+        yield
+        health_checker.stop()
+        if service_discovery:
+            service_discovery.stop()
+        await backend.close()
+        logger.info('DLRouter stopped.')
+
     app = FastAPI(
         title='DLRouter',
         description=('A high-performance router for LLM inference backends'),
         version='0.1.0',
         docs_url='/',
+        lifespan=lifespan,
     )
 
     # Register validation error handler to log full request body
@@ -96,9 +121,7 @@ def create_app(
     # Service discovery (backend-specific, e.g., ZMQ for vLLM PD mode)
     service_discovery: Optional[Any] = None
     if config.serving_strategy == ServingStrategy.DISTSERVE:
-        # Get discovery mode from backend_config
-        discovery_mode_str = config.backend_config.get('discovery_mode', 'heartbeat')
-        discovery_mode = ServiceDiscoveryMode(discovery_mode_str)
+        discovery_mode = _resolve_distserve_discovery_mode(backend, config)
 
         service_discovery = backend.create_service_discovery(
             discovery_mode,
@@ -123,24 +146,6 @@ def create_app(
 
     # Health checker
     health_checker = HealthChecker(node_manager, service_discovery)
-
-    @app.on_event('startup')
-    async def on_startup():
-        health_checker.start()
-        # Start service discovery if enabled
-        if service_discovery:
-            service_discovery.start()
-        logger.info('DLRouter started.')
-
-    @app.on_event('shutdown')
-    async def on_shutdown():
-        health_checker.stop()
-        # Stop service discovery if enabled
-        if service_discovery:
-            service_discovery.stop()
-        # Close backend connection pool
-        await backend.close()
-        logger.info('DLRouter stopped.')
 
     # Store references on app for external access
     app.state.node_manager = node_manager

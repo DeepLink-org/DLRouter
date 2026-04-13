@@ -123,40 +123,17 @@ class ZMQHeartbeatDiscovery(HeartbeatServiceDiscovery):
             http_address = data.get('http_address')
             zmq_address = data.get('zmq_address')
             instance_type = data.get('type')
+            metadata = data.get('metadata')
 
             if not all([http_address, zmq_address, instance_type]):
                 logger.warning(f'Invalid message from {remote_address}: {data}')
                 return
 
             if instance_type == 'P':
-                self._register_prefill(http_address, zmq_address)
+                self._register_prefill(http_address, zmq_address, metadata=metadata)
             elif instance_type == 'D':
-                self._register_decode(http_address, zmq_address)
+                self._register_decode(http_address, zmq_address, metadata=metadata)
             else:
                 logger.warning(f'Unknown instance type from {remote_address}: {data}')
         except Exception as e:
             logger.error(f'Error handling ZMQ message: {e}')
-
-    # -- vLLM-specific request_id encoding --
-
-    def build_request_id(
-        self,
-        prefill_info: Any,  # NodeInfo
-        decode_info: Any,  # NodeInfo
-        base_id: str,
-    ) -> str:
-        """Build vLLM-style request ID with ZMQ addresses.
-
-        Format: ___prefill_addr_{p_zmq}___decode_addr_{d_zmq}_{uuid}
-
-        Args:
-            prefill_info: Prefill NodeInfo.
-            decode_info: Decode NodeInfo.
-            base_id: Base UUID.
-
-        Returns:
-            Encoded request ID string.
-        """
-        p_zmq = prefill_info.zmq_address
-        d_zmq = decode_info.zmq_address
-        return f'___prefill_addr_{p_zmq}___decode_addr_{d_zmq}_{base_id}'

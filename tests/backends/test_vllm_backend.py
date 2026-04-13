@@ -4,6 +4,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import aiohttp
 import pytest
+from fastapi.responses import JSONResponse
+from pydantic import ValidationError
 
 from dlrouter.backends.base import PDRequestContext
 from dlrouter.backends.factory import create_backend, get_backend_definition
@@ -11,6 +13,7 @@ from dlrouter.backends.lmdeploy import LMDeployBackend
 from dlrouter.backends.vllm import (
     VLLM_BACKEND_DEFINITION,
     VLLMBackend,
+    VLLMKVTransferAdapter,
     VLLMPDConfig,
 )
 from dlrouter.constants import BackendType, ServiceDiscoveryMode
@@ -421,7 +424,6 @@ class TestCLIArgs:
         args = VLLMBackend.get_cli_args()
         assert isinstance(args, list)
         assert [arg.name for arg in args] == [
-            'discovery_mode',
             'zmq_host',
             'zmq_port',
             'zmq_ping_timeout',
@@ -462,6 +464,8 @@ class TestParseConfig:
 
     def test_parse_config_defaults(self):
         config = VLLMBackend.parse_config()
+        assert config.discovery_mode is ServiceDiscoveryMode.HEARTBEAT
+        assert config.pd_protocol == 'two_stage_kv_transfer'
         assert config.zmq_host == '0.0.0.0'
         assert config.zmq_port == 30001
         assert config.ping_timeout_seconds == 5
@@ -474,6 +478,52 @@ class TestParseConfig:
     def test_parse_config_empty_models(self):
         config = VLLMBackend.parse_config(models=None)
         assert config.models == []
+
+    def test_parse_config_supports_two_stage_protocol_fields(self):
+        config = VLLMBackend.parse_config(
+            pd_protocol='two_stage_kv_transfer',
+            prefill_urls='http://10.0.0.1:8200',
+            decode_urls='http://10.0.0.2:8200',
+        )
+
+        assert config.discovery_mode is ServiceDiscoveryMode.STATIC
+        assert config.pd_protocol == 'two_stage_kv_transfer'
+        assert config.prefill_urls == ['http://10.0.0.1:8200']
+        assert config.decode_urls == ['http://10.0.0.2:8200']
+
+    def test_parse_config_defaults_to_two_stage_protocol(self):
+        config = VLLMBackend.parse_config()
+
+        assert config.discovery_mode is ServiceDiscoveryMode.HEARTBEAT
+        assert config.pd_protocol == 'two_stage_kv_transfer'
+
+    def test_parse_config_infers_static_when_both_url_lists_are_present(self):
+        config = VLLMBackend.parse_config(
+            prefill_urls='http://10.0.0.1:8200',
+            decode_urls='http://10.0.0.2:8200',
+        )
+
+        assert config.discovery_mode is ServiceDiscoveryMode.STATIC
+
+    def test_parse_config_rejects_prefill_without_decode_urls(self):
+        with pytest.raises(ValueError, match='prefill_urls and decode_urls must be provided together'):
+            VLLMBackend.parse_config(prefill_urls='http://10.0.0.1:8200')
+
+    def test_parse_config_rejects_decode_without_prefill_urls(self):
+        with pytest.raises(ValueError, match='prefill_urls and decode_urls must be provided together'):
+            VLLMBackend.parse_config(decode_urls='http://10.0.0.2:8200')
+
+
+class TestCreate:
+    def test_create_injects_pd_config_into_backend(self):
+        config = VLLMPDConfig(
+            discovery_mode=ServiceDiscoveryMode.STATIC,
+            pd_protocol='two_stage_kv_transfer',
+        )
+
+        backend = VLLMBackend.create(config)
+
+        assert backend.pd_config is config
 
 
 # ---------------------------------------------------------------------------
@@ -488,6 +538,7 @@ class TestCreateServiceDiscovery:
         backend = VLLMBackend()
         mock_node_manager = MagicMock()
         backend_config = {
+            'pd_protocol': 'two_stage_kv_transfer',
             'zmq_host': '127.0.0.1',
             'zmq_port': 30002,
             'zmq_ping_timeout': 10,
@@ -508,22 +559,37 @@ class TestCreateServiceDiscovery:
         assert discovery._node_manager is mock_node_manager
 
     def test_creates_with_default_config(self):
-        from dlrouter.core.service_discovery import ZMQHeartbeatDiscovery
+        from dlrouter.core.service_discovery import StaticServiceDiscovery
 
         backend = VLLMBackend()
         mock_node_manager = MagicMock()
 
         discovery = backend.create_service_discovery(
-            ServiceDiscoveryMode.HEARTBEAT,
+            ServiceDiscoveryMode.STATIC,
             {},
             mock_node_manager,
         )
 
-        assert isinstance(discovery, ZMQHeartbeatDiscovery)
-        assert discovery._host == '0.0.0.0'
-        assert discovery._port == 30001
-        assert discovery._ping_timeout == 5
+        assert isinstance(discovery, StaticServiceDiscovery)
         assert discovery._models == []
+        assert discovery.get_prefill_count() == 0
+        assert discovery.get_decode_count() == 0
+
+    def test_creates_heartbeat_discovery_for_two_stage(self):
+        backend = VLLMBackend.create(
+            VLLMPDConfig(
+                discovery_mode=ServiceDiscoveryMode.HEARTBEAT,
+                pd_protocol='two_stage_kv_transfer',
+            )
+        )
+
+        discovery = backend.create_service_discovery(
+            ServiceDiscoveryMode.HEARTBEAT,
+            {'pd_protocol': 'two_stage_kv_transfer'},
+            MagicMock(),
+        )
+
+        assert discovery is not None
 
     def test_lmdeploy_backend_returns_none(self):
         backend = LMDeployBackend()
@@ -562,7 +628,8 @@ class TestHandlePDRequest:
         """Test handle_pd_request when no P/D instances available."""
         backend = VLLMBackend()
         mock_discovery = MagicMock()
-        mock_discovery.select_pd_pair.return_value = None
+        mock_discovery.get_prefill_instances.return_value = []
+        mock_discovery.get_decode_instances.return_value = []
 
         response = await backend.handle_pd_request(
             {'model': 'test-model', 'messages': []},
@@ -573,86 +640,101 @@ class TestHandlePDRequest:
         )
 
         assert response.status_code == 503
-        mock_discovery.select_pd_pair.assert_called_once()
+        mock_discovery.get_prefill_instances.assert_called_once()
+        mock_discovery.get_decode_instances.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_handle_pd_request_uses_two_stage_by_default(self):
+        backend = VLLMBackend.create(VLLMBackend.parse_config(discovery_mode='static'))
+        backend._build_two_stage_executor = MagicMock()
+        backend._build_two_stage_executor.return_value.execute = AsyncMock(return_value='ok')
+
+        mock_discovery = MagicMock()
+        mock_discovery.get_prefill_instances.return_value = [self._make_pd_pair()[0]]
+        mock_discovery.get_decode_instances.return_value = [self._make_pd_pair()[1]]
+
+        await backend.handle_pd_request(
+            {'model': 'test-model', 'messages': []},
+            'test-model',
+            '/v1/chat/completions',
+            stream=False,
+            context=PDRequestContext(node_manager=MagicMock(), service_discovery=mock_discovery),
+        )
+
+        backend._build_two_stage_executor.return_value.execute.assert_awaited_once()
+
+    def test_build_two_stage_executor_uses_vllm_adapter(self):
+        backend = VLLMBackend.create(VLLMBackend.parse_config())
+
+        executor = backend._build_two_stage_executor()
+
+        assert isinstance(executor.adapter, VLLMKVTransferAdapter)
+
+
+class TestLegacyProtocolRemoval:
+    def test_parse_config_rejects_legacy_request_id_protocol(self):
+        with pytest.raises(ValidationError):
+            VLLMBackend.parse_config(pd_protocol='legacy_request_id')
 
     @pytest.mark.asyncio
     async def test_handle_pd_request_prefill_error(self):
-        """Test handle_pd_request when prefill phase fails."""
-        backend = VLLMBackend()
-        mock_discovery = MagicMock()
-        mock_discovery.select_pd_pair.return_value = self._make_pd_pair()
-        mock_discovery.build_request_id.return_value = 'test-request-id'
-
-        # Mock stream_forward_with_request_id to raise exception
-        async def mock_stream_error(*args, **kwargs):
-            raise Exception('Prefill failed')
-            yield  # Make it a generator
-
-        backend.stream_forward_with_request_id = mock_stream_error
+        """Test handle_pd_request delegates executor errors/responses."""
+        backend = VLLMBackend.create(VLLMBackend.parse_config(discovery_mode='static'))
+        backend._build_two_stage_executor = MagicMock()
+        backend._build_two_stage_executor.return_value.execute = AsyncMock(
+            return_value=JSONResponse({'error': 'Prefill phase failed'}, status_code=502)
+        )
 
         response = await backend.handle_pd_request(
             {'model': 'test-model', 'messages': []},
             'test-model',
             '/v1/chat/completions',
             stream=False,
-            context=PDRequestContext(node_manager=MagicMock(), service_discovery=mock_discovery),
+            context=PDRequestContext(node_manager=MagicMock(), service_discovery=MagicMock()),
         )
 
         assert response.status_code == 502
 
     @pytest.mark.asyncio
     async def test_handle_pd_request_success_non_stream(self):
-        """Test handle_pd_request success (non-streaming)."""
-        backend = VLLMBackend()
-        mock_discovery = MagicMock()
-        mock_discovery.select_pd_pair.return_value = self._make_pd_pair()
-        mock_discovery.build_request_id.return_value = 'test-request-id'
-
-        # Mock prefill (stream_forward_with_request_id)
-        async def mock_prefill_stream(*args, **kwargs):
-            yield b'data: {"done": true}\n\n'
-
-        # Mock decode (forward_with_request_id)
-        async def mock_forward(*args, **kwargs):
-            return '{"id": "cmpl-123", "choices": [{"text": "hello"}]}'
-
-        backend.stream_forward_with_request_id = mock_prefill_stream
-        backend.forward_with_request_id = mock_forward
+        """Test handle_pd_request returns non-stream executor response."""
+        backend = VLLMBackend.create(VLLMBackend.parse_config(discovery_mode='static'))
+        backend._build_two_stage_executor = MagicMock()
+        backend._build_two_stage_executor.return_value.execute = AsyncMock(
+            return_value=JSONResponse({'id': 'cmpl-123', 'choices': [{'text': 'hello'}]})
+        )
 
         response = await backend.handle_pd_request(
             {'model': 'test-model', 'messages': []},
             'test-model',
             '/v1/chat/completions',
             stream=False,
-            context=PDRequestContext(node_manager=MagicMock(), service_discovery=mock_discovery),
+            context=PDRequestContext(node_manager=MagicMock(), service_discovery=MagicMock()),
         )
 
         assert response.status_code == 200
-        mock_discovery.select_pd_pair.assert_called_once()
-        mock_discovery.build_request_id.assert_called_once()
+        backend._build_two_stage_executor.return_value.execute.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_handle_pd_request_success_stream(self):
         """Test handle_pd_request success (streaming)."""
         from fastapi.responses import StreamingResponse
 
-        backend = VLLMBackend()
-        mock_discovery = MagicMock()
-        mock_discovery.select_pd_pair.return_value = self._make_pd_pair()
-        mock_discovery.build_request_id.return_value = 'test-request-id'
+        async def _stream():
+            yield b'data: {"choices":[{"delta":{"content":"hello"}}]}\n\n'
 
-        # Mock prefill
-        async def mock_prefill_stream(*args, **kwargs):
-            yield b'data: {"done": true}\n\n'
-
-        backend.stream_forward_with_request_id = mock_prefill_stream
+        backend = VLLMBackend.create(VLLMBackend.parse_config(discovery_mode='static'))
+        backend._build_two_stage_executor = MagicMock()
+        backend._build_two_stage_executor.return_value.execute = AsyncMock(
+            return_value=StreamingResponse(_stream(), media_type='text/event-stream')
+        )
 
         response = await backend.handle_pd_request(
             {'model': 'test-model', 'messages': []},
             'test-model',
             '/v1/chat/completions',
             stream=True,
-            context=PDRequestContext(node_manager=MagicMock(), service_discovery=mock_discovery),
+            context=PDRequestContext(node_manager=MagicMock(), service_discovery=MagicMock()),
         )
 
         assert isinstance(response, StreamingResponse)
@@ -660,29 +742,19 @@ class TestHandlePDRequest:
 
     @pytest.mark.asyncio
     async def test_handle_pd_request_decode_error_non_stream(self):
-        """Test handle_pd_request when decode phase fails (non-streaming)."""
-        backend = VLLMBackend()
-        mock_discovery = MagicMock()
-        mock_discovery.select_pd_pair.return_value = self._make_pd_pair()
-        mock_discovery.build_request_id.return_value = 'test-request-id'
-
-        # Mock prefill success
-        async def mock_prefill_stream(*args, **kwargs):
-            yield b'data: {"done": true}\n\n'
-
-        # Mock decode error
-        async def mock_forward_error(*args, **kwargs):
-            raise Exception('Decode failed')
-
-        backend.stream_forward_with_request_id = mock_prefill_stream
-        backend.forward_with_request_id = mock_forward_error
+        """Test handle_pd_request surfaces decode-phase errors from executor."""
+        backend = VLLMBackend.create(VLLMBackend.parse_config(discovery_mode='static'))
+        backend._build_two_stage_executor = MagicMock()
+        backend._build_two_stage_executor.return_value.execute = AsyncMock(
+            return_value=JSONResponse({'error': 'Decode phase failed'}, status_code=502)
+        )
 
         response = await backend.handle_pd_request(
             {'model': 'test-model', 'messages': []},
             'test-model',
             '/v1/chat/completions',
             stream=False,
-            context=PDRequestContext(node_manager=MagicMock(), service_discovery=mock_discovery),
+            context=PDRequestContext(node_manager=MagicMock(), service_discovery=MagicMock()),
         )
 
         assert response.status_code == 502

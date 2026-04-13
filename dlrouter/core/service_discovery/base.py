@@ -12,6 +12,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Optional
 
 from dlrouter.constants import EngineRole
+from dlrouter.core.service_discovery.registry import ServiceDiscoveryRegistry
 from dlrouter.logger import get_logger
 
 
@@ -80,6 +81,7 @@ class BaseServiceDiscovery(ABC):
         self._node_manager = node_manager
         self._models = models or []
         self._running = False
+        self._registry = ServiceDiscoveryRegistry()
 
     # -- Lifecycle --
 
@@ -181,23 +183,77 @@ class BaseServiceDiscovery(ABC):
 
     # -- Query --
 
-    @abstractmethod
     def get_prefill_count(self) -> int:
         """Get number of active prefill instances."""
+        return len(self.get_prefill_instances())
 
-    @abstractmethod
     def get_decode_count(self) -> int:
         """Get number of active decode instances."""
+        return len(self.get_decode_instances())
 
-    @abstractmethod
     def get_prefill_instances(self) -> list[NodeInfo]:
         """Get list of all prefill instances."""
+        return self.filter_instances(role=EngineRole.PREFILL)
 
-    @abstractmethod
     def get_decode_instances(self) -> list[NodeInfo]:
         """Get list of all decode instances."""
+        return self.filter_instances(role=EngineRole.DECODE)
+
+    def get_all_instances(self) -> list[NodeInfo]:
+        """Get list of all known instances."""
+        return self._registry.get_all_instances()
+
+    def filter_instances(
+        self,
+        *,
+        role: Optional[EngineRole] = None,
+        model: Optional[str] = None,
+        metadata: Optional[dict[str, Any]] = None,
+    ) -> list[NodeInfo]:
+        """Filter discovered instances."""
+        return self._registry.filter_instances(
+            role=role,
+            model=model,
+            metadata=metadata,
+        )
 
     # -- NodeManager Sync --
+
+    def _prepare_node_for_registration(self, node_info: NodeInfo) -> Optional[NodeInfo]:
+        """Populate models before registry upsert and node_manager sync.
+
+        If explicit models are already available, use them directly. Otherwise,
+        try to fetch models through the backend before the node enters the
+        routing registry. Returning None means registration should be skipped
+        for now and retried on the next discovery event.
+        """
+        if node_info.models:
+            return node_info
+
+        if self._models:
+            node_info.models = self._models.copy()
+            return node_info
+
+        if self._node_manager is None:
+            return node_info
+
+        backend = getattr(self._node_manager, 'backend', None)
+        if backend is None:
+            return node_info
+
+        node_url = node_info.to_http_url()
+        try:
+            models = backend.fetch_models(node_url)
+        except Exception as e:
+            logger.warning(f'Skip registering instance {node_url}: failed to fetch models: {e}')
+            return None
+
+        if not models:
+            logger.warning(f'Skip registering instance {node_url}: no models available yet')
+            return None
+
+        node_info.models = list(models)
+        return node_info
 
     def _sync_to_node_manager(self, node_info: NodeInfo) -> None:
         """Sync discovered instance to NodeManager.
@@ -252,29 +308,3 @@ class BaseServiceDiscovery(ABC):
             'prefill_instances': [{'http': n.http_address, 'zmq': n.zmq_address} for n in self.get_prefill_instances()],
             'decode_instances': [{'http': n.http_address, 'zmq': n.zmq_address} for n in self.get_decode_instances()],
         }
-
-    # -- Request ID Building (for vLLM PD mode) --
-
-    def build_request_id(
-        self,
-        prefill_info: NodeInfo,
-        decode_info: NodeInfo,
-        base_id: str,
-    ) -> str:
-        """Build a request ID encoding PD addresses.
-
-        Default implementation for vLLM-style request_id encoding.
-        Subclasses can override for backend-specific formats.
-
-        Args:
-            prefill_info: Prefill node information.
-            decode_info: Decode node information.
-            base_id: Base UUID for the request.
-
-        Returns:
-            Encoded request ID string.
-        """
-        # vLLM PD format: ___prefill_addr_{p_zmq}___decode_addr_{d_zmq}_{uuid}
-        p_addr = prefill_info.zmq_address or prefill_info.http_address
-        d_addr = decode_info.zmq_address or decode_info.http_address
-        return f'___prefill_addr_{p_addr}___decode_addr_{d_addr}_{base_id}'
