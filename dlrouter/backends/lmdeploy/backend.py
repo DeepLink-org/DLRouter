@@ -12,10 +12,18 @@ from typing import Any, Optional
 
 import aiohttp
 import requests
-from pydantic import BaseModel
+from fastapi import BackgroundTasks
+from fastapi.responses import JSONResponse, StreamingResponse
 
-from dlrouter.backends.base import BaseBackend, CLIArg
-from dlrouter.constants import AIOHTTP_TIMEOUT, HEALTH_CHECK_TIMEOUT
+from dlrouter.backends.base import BaseBackend, CLIArg, PDRequestContext
+from dlrouter.backends.lmdeploy.config import LMDeployPDConfig
+from dlrouter.constants import (
+    AIOHTTP_TIMEOUT,
+    ERROR_MESSAGES,
+    HEALTH_CHECK_TIMEOUT,
+    EngineRole,
+    ErrorCode,
+)
 from dlrouter.logger import get_logger
 
 
@@ -26,28 +34,8 @@ DEFAULT_POOL_CONNECTIONS = 100
 DEFAULT_POOL_MAXSIZE = 100
 
 
-class LMDeployPDConfig(BaseModel):
-    """LMDeploy PD disaggregation config.
-
-    This config is used when serving_strategy is DISTSERVE
-    and backend is LMDeploy.
-    """
-
-    migration_protocol: str = 'RDMA'
-    link_type: str = 'RoCE'
-    with_gdr: bool = True
-    dummy_prefill: bool = False
-
-
 class LMDeployBackend(BaseBackend):
-    """Backend adapter for LMDeploy inference engine.
-
-    Handles both standard (Hybrid) forwarding and
-    PD disaggregation (DistServe) flows.
-
-    Uses a persistent aiohttp.ClientSession with connection pooling
-    for better performance under high concurrency.
-    """
+    """Backend adapter for LMDeploy inference engine."""
 
     def __init__(
         self,
@@ -60,18 +48,20 @@ class LMDeployBackend(BaseBackend):
         self._health_timeout = aiohttp.ClientTimeout(
             total=HEALTH_CHECK_TIMEOUT,
         )
-        # Connection pool settings
         self._connector_kwargs = {
             'limit': pool_connections,
             'limit_per_host': pool_maxsize,
             'ttl_dns_cache': 300,
             'enable_cleanup_closed': True,
         }
-        # Lazy-initialized session (bound to specific event loop)
         self._session: Optional[aiohttp.ClientSession] = None
         self._session_lock: Optional[asyncio.Lock] = None
-        # PD connection pool (lazy import)
         self._pd_pool = None
+
+    @classmethod
+    def create(cls, parsed_config: Optional[LMDeployPDConfig] = None) -> 'LMDeployBackend':
+        """Create an LMDeploy backend from parsed configuration."""
+        return cls(pd_config=parsed_config)
 
     def _get_pd_pool(self):
         """Lazy-init PD connection pool."""
@@ -89,17 +79,8 @@ class LMDeployBackend(BaseBackend):
                 self._pd_pool = None
         return self._pd_pool
 
-    # -- Session management --
-
     async def _get_session(self) -> aiohttp.ClientSession:
-        """Get or create a persistent aiohttp session.
-
-        Uses double-checked locking for thread-safe lazy initialization.
-        The lock is lazily created to ensure it's bound to the
-        correct event loop.
-        """
-        # Lazily create the lock to ensure it's bound to
-        # the current event loop
+        """Get or create a persistent aiohttp session."""
         if self._session_lock is None:
             self._session_lock = asyncio.Lock()
 
@@ -114,10 +95,7 @@ class LMDeployBackend(BaseBackend):
         return self._session
 
     async def close(self) -> None:
-        """Close the persistent session.
-
-        Should be called during application shutdown.
-        """
+        """Close the persistent session."""
         if self._session and not self._session.closed:
             await self._session.close()
             self._session = None
@@ -127,8 +105,6 @@ class LMDeployBackend(BaseBackend):
         pool = self._get_pd_pool()
         if pool is not None:
             pool.dereg_instance(node_url)
-
-    # -- Core forwarding --
 
     async def forward_request(
         self,
@@ -181,18 +157,13 @@ class LMDeployBackend(BaseBackend):
             resp = requests.get(url, headers=headers)
             resp.raise_for_status()
             data = resp.json()
-            models = [m['id'] for m in data.get('data', [])]
-            return models
+            return [m['id'] for m in data.get('data', [])]
         except Exception as e:
             logger.error(f'Failed to fetch models from {node_url}: {e}')
             return []
 
     async def check_health(self, node_url: str) -> bool:
-        """Check LMDeploy node health via async request.
-
-        Uses a temporary session to avoid event loop binding issues
-        when called from different threads (e.g., health check thread).
-        """
+        """Check LMDeploy node health via async request."""
         url = f'{node_url}/health'
         try:
             async with (
@@ -207,11 +178,107 @@ class LMDeployBackend(BaseBackend):
             logger.error(f'Failed to check health from {node_url}: {e}')
             return False
 
-    # -- PD Disaggregation support --
-
     def supports_pd_disagg(self) -> bool:
         """LMDeploy supports PD disaggregation."""
         return True
+
+    @staticmethod
+    def _error_json(code: ErrorCode) -> dict[str, Any]:
+        return {
+            'error_code': code.value,
+            'text': ERROR_MESSAGES[code],
+        }
+
+    def _model_not_found_response(self, model_name: str) -> JSONResponse:
+        logger.warning(f'Model not found: {model_name}')
+        return JSONResponse(
+            self._error_json(ErrorCode.MODEL_NOT_FOUND),
+            status_code=404,
+        )
+
+    def _backend_error_response(self) -> JSONResponse:
+        return JSONResponse(
+            self._error_json(ErrorCode.BACKEND_ERROR),
+            status_code=502,
+        )
+
+    async def handle_pd_request(
+        self,
+        request_data: dict[str, Any],
+        model_name: str,
+        endpoint: str,
+        stream: bool,
+        context: PDRequestContext,
+    ) -> Any:
+        """Handle request in LMDeploy PD mode."""
+        node_manager = context.node_manager
+        request_key = context.request_key
+        dummy_prefill = self.pd_config.dummy_prefill
+
+        prefill_info: dict[str, Any] = {}
+        p_url = 'dummy:dummy'
+        if not dummy_prefill:
+            p_url = node_manager.get_node_url(
+                model_name,
+                EngineRole.PREFILL,
+                request_key,
+            )
+            if not p_url:
+                return self._model_not_found_response(model_name)
+
+            logger.info(f'Prefill dispatched to {p_url}')
+            start_p = node_manager.pre_call(p_url)
+            try:
+                prefill_info = (await self.prefill_request(p_url, endpoint, request_data)) or {}
+            finally:
+                node_manager.post_call(p_url, start_p)
+
+        d_url = node_manager.get_node_url(model_name, EngineRole.DECODE, request_key)
+        if not d_url:
+            return self._model_not_found_response(model_name)
+        logger.info(f'Decode dispatched to {d_url}')
+
+        if not dummy_prefill and not self.is_connected_pd(p_url, d_url):
+            await self.connect_pd(p_url, d_url)
+
+        decode_request_data = copy.deepcopy(request_data)
+        decode_request_data['_prefill_url'] = p_url
+
+        start_d = node_manager.pre_call(d_url)
+        should_unshelf = bool(not dummy_prefill and prefill_info.get('id'))
+        if should_unshelf:
+            self.shelf_prefill_session(p_url, d_url, prefill_info['id'])
+
+        try:
+            result = await self.decode_request(
+                d_url,
+                endpoint,
+                decode_request_data,
+                prefill_info,
+                stream=stream,
+            )
+        except Exception as e:
+            logger.error(f'Decode error: {e}')
+            node_manager.post_call(d_url, start_d)
+            if should_unshelf:
+                self.unshelf_prefill_session(p_url, d_url, prefill_info['id'])
+            return self._backend_error_response()
+
+        if stream:
+            bg = BackgroundTasks()
+            bg.add_task(node_manager.post_call, d_url, start_d)
+            if should_unshelf:
+                bg.add_task(self.unshelf_prefill_session, p_url, d_url, prefill_info['id'])
+            return StreamingResponse(
+                result,
+                background=bg,
+                media_type='text/event-stream',
+            )
+
+        node_manager.post_call(d_url, start_d)
+        if should_unshelf:
+            self.unshelf_prefill_session(p_url, d_url, prefill_info['id'])
+        return JSONResponse(json.loads(result))
 
     async def prefill_request(
         self,
@@ -335,8 +402,6 @@ class LMDeployBackend(BaseBackend):
         if pool:
             pool.unshelf_prefill_session((p_url, d_url), session_id)
 
-    # -- CLI argument registration --
-
     @classmethod
     def get_cli_args(cls) -> list[CLIArg]:
         """Return LMDeploy-specific CLI arguments."""
@@ -369,7 +434,7 @@ class LMDeployBackend(BaseBackend):
         ]
 
     @classmethod
-    def parse_config(cls, **kwargs) -> 'LMDeployPDConfig':
+    def parse_config(cls, **kwargs) -> LMDeployPDConfig:
         """Parse LMDeploy-specific config from CLI args."""
         return LMDeployPDConfig(
             migration_protocol=kwargs.get('migration_protocol', 'RDMA'),

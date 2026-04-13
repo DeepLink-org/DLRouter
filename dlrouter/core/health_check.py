@@ -4,7 +4,7 @@ import asyncio
 import threading
 import time
 from collections import defaultdict
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Optional
 
 from dlrouter.constants import (
     HEALTH_CHECK_MAX_FAILURES,
@@ -15,6 +15,7 @@ from dlrouter.logger import get_logger
 
 if TYPE_CHECKING:
     from dlrouter.core.node_manager import NodeManager
+    from dlrouter.core.service_discovery.base import BaseServiceDiscovery
 
 logger = get_logger('dlrouter.health')
 
@@ -37,11 +38,13 @@ class HealthChecker:
     def __init__(
         self,
         node_manager: 'NodeManager',
+        service_discovery: Optional['BaseServiceDiscovery'] = None,
         interval: int = HEARTBEAT_EXPIRATION,
         max_failures: int = HEALTH_CHECK_MAX_FAILURES,
         batch_size: int = 50,
     ) -> None:
         self._manager = node_manager
+        self._service_discovery = service_discovery
         self._interval = interval
         self._max_failures = max_failures
         self._batch_size = batch_size  # Max concurrent health checks
@@ -117,6 +120,8 @@ class HealthChecker:
         # Remove stale nodes
         for url in stale:
             self._manager.remove(url)
+            if self._service_discovery is not None:
+                self._service_discovery.remove_node_url(url)
             self._fail_counts.pop(url, None)
             logger.info(
                 f'Removed stale node: {url} (failed {self._max_failures} consecutive checks)',

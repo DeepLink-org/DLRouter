@@ -16,10 +16,12 @@ A high-performance router / load balancer for large language model (LLM) inferen
   - **LMDeploy** (including PD disaggregation / DistServe)
   - **vLLM** (standard OpenAI-compatible API forwarding, plus PD disaggregation via ZMQ service discovery)
 - **PD Disaggregation (DistServe)** — First-class support for LMDeploy's and vLLM's Prefill-Decode separation, with automatic PD connection management and migration request handling.
+- **Backend-Owned DistServe Flow** — `ProxyEngine` only dispatches DistServe requests; each backend owns its own PD orchestration (`LMDeploy` via `NodeManager`, `vLLM` via service discovery).
 - **Dynamic Node Management** — Register, remove, and terminate backend nodes at runtime via REST API.
 - **Automatic Health Checks** — Background heartbeat thread removes unhealthy nodes automatically.
 - **API Key Authentication** — Optional Bearer token authentication for all endpoints.
 - **SSL / TLS Support** — Enable HTTPS via environment variables.
+- **Clear Discovery Semantics** — `HYBRID` nodes are added explicitly; `DISTSERVE` uses either `static` or `heartbeat` discovery for vLLM PD.
 
 ## Project Structure
 
@@ -40,14 +42,14 @@ DLRouter/
 │   │       └── nodes.py       # Node management endpoints
 │   ├── backends/
 │   │   ├── base.py            # Abstract backend interface
-│   │   ├── lmdeploy_backend.py # LMDeploy adapter (+ PD disagg)
-│   │   ├── vllm_backend.py    # vLLM adapter
+│   │   ├── lmdeploy/          # LMDeploy backend package (+ PD disagg)
+│   │   ├── vllm/              # vLLM backend package
 │   │   └── factory.py         # Backend factory
 │   ├── core/
 │   │   ├── node_manager.py    # Node registry & lifecycle
 │   │   ├── proxy_engine.py    # Request dispatch (Hybrid / DistServe)
 │   │   ├── health_check.py    # Background health checker
-│   │   └── zmq_discovery.py   # ZMQ service discovery for vLLM PD
+│   │   └── service_discovery/ # Static + heartbeat discovery abstractions for PD
 │   ├── models/
 │   │   ├── node.py            # Node / NodeStatus models
 │   │   └── protocol.py        # OpenAI-compatible request/response models
@@ -61,9 +63,12 @@ DLRouter/
 │       └── factory.py         # Strategy factory
 ├── tests/
 │   ├── backends/
-│   │   └── test_vllm_backend.py   # vLLM backend unit tests
+│   │   ├── test_lmdeploy_backend.py # LMDeploy backend PD tests
+│   │   └── test_vllm_backend.py     # vLLM backend unit tests
 │   ├── core/
-│   │   └── test_zmq_discovery.py  # ZMQ service discovery tests
+│   │   ├── test_proxy_engine.py   # ProxyEngine delegation tests
+│   │   ├── test_service_discovery_factory.py # Discovery factory tests
+│   │   └── test_zmq_discovery.py  # ZMQ heartbeat discovery tests
 │   ├── routing/
 │   │   └── test_routing.py        # Routing strategy unit tests
 │   └── utils/
@@ -119,9 +124,12 @@ dlrouter
 | `--dummy_prefill` | `False` | Use dummy prefill (for testing) |
 
 *vLLM options:*
+| `--discovery_mode` | `heartbeat` | Node discovery mode for vLLM PD (`static` / `heartbeat`) |
 | `--zmq_host` | `0.0.0.0` | ZMQ service discovery bind host |
 | `--zmq_port` | `30001` | ZMQ service discovery port |
 | `--zmq_ping_timeout` | `5` | ZMQ instance ping timeout (seconds) |
+| `--prefill_urls` | `None` | Comma-separated prefill URLs (used in `static` mode) |
+| `--decode_urls` | `None` | Comma-separated decode URLs (used in `static` mode) |
 | `--models` | `None` | Comma-separated model names (optional, auto-fetched from nodes) |
 
 ### Examples
@@ -136,8 +144,14 @@ python -m dlrouter --routing_strategy consistent_hash --api_keys "sk-abc123,sk-d
 # LMDeploy PD disaggregation mode (DistServe)
 python -m dlrouter --serving_strategy distserve --backend lmdeploy --link_type RoCE
 
-# vLLM PD disaggregation mode (with ZMQ service discovery)
+# vLLM PD disaggregation mode (heartbeat registration)
 python -m dlrouter --serving_strategy distserve --backend vllm --zmq_port 30001
+
+# vLLM PD disaggregation mode (static P/D lists)
+python -m dlrouter --serving_strategy distserve --backend vllm \
+  --discovery_mode static \
+  --prefill_urls "http://10.21.9.10:30000" \
+  --decode_urls "http://10.21.9.15:30000"
 
 # Use vllm as backend (standard mode)
 python -m dlrouter --backend vllm
@@ -166,6 +180,12 @@ python -m dlrouter --workers 4
 | `POST` | `/nodes/remove` | Remove a registered node |
 | `POST` | `/nodes/terminate` | Terminate and remove a node |
 | `GET` | `/nodes/terminate_all` | Terminate all nodes |
+
+### Discovery Semantics
+
+- `HYBRID`: backend instances are registered explicitly, typically via `/nodes/add` or direct `NodeManager.add(...)`.
+- `DISTSERVE + vLLM`: discovery mode is either `static` or `heartbeat`.
+- `DISTSERVE + LMDeploy`: Prefill/Decode nodes are still selected from `NodeManager`; no separate discovery component is created.
 
 ### Usage Example
 
@@ -255,6 +275,8 @@ Client (OpenAI SDK / curl)
 
 **DistServe (PD Disaggregation) mode:**
 
+`ProxyEngine` does not implement backend-specific PD logic anymore. It delegates every DistServe request to `backend.handle_pd_request(...)`, passing a small context object with `NodeManager`, optional `service_discovery`, and `request_key`.
+
 *LMDeploy PD:*
 ```
 Client
@@ -269,6 +291,8 @@ DLRouter
   └─ 2. Decode  ──► D Node (Decode engine) ──► Response
 ```
 
+LMDeploy does not use a separate discovery component in DistServe mode. Prefill and decode nodes are selected from `NodeManager`, and the LMDeploy backend handles PD connection setup, migration request construction, and cleanup.
+
 *vLLM PD (ZMQ Service Discovery):*
 ```
 vLLM P/D Instances ──► ZMQ Register ──► DLRouter
@@ -282,6 +306,8 @@ Request ────► Prefill (max_tokens=1) ──► P Node
                   │
               Decode ──────────────────► D Node ──► Response
 ```
+
+vLLM DistServe keeps using backend-owned PD orchestration as well, but its node selection source is `service_discovery` rather than `NodeManager`.
 
 ## Acknowledgements
 

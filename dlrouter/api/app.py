@@ -16,7 +16,7 @@ from dlrouter.api.routes import (
 )
 from dlrouter.backends.factory import create_backend
 from dlrouter.config import RouterConfig
-from dlrouter.constants import ServingStrategy
+from dlrouter.constants import ServiceDiscoveryMode, ServingStrategy
 from dlrouter.core.health_check import HealthChecker
 from dlrouter.core.node_manager import NodeManager
 from dlrouter.core.proxy_engine import ProxyEngine
@@ -96,7 +96,12 @@ def create_app(
     # Service discovery (backend-specific, e.g., ZMQ for vLLM PD mode)
     service_discovery: Optional[Any] = None
     if config.serving_strategy == ServingStrategy.DISTSERVE:
+        # Get discovery mode from backend_config
+        discovery_mode_str = config.backend_config.get('discovery_mode', 'heartbeat')
+        discovery_mode = ServiceDiscoveryMode(discovery_mode_str)
+
         service_discovery = backend.create_service_discovery(
+            discovery_mode,
             config.backend_config,
             node_manager,
         )
@@ -117,7 +122,7 @@ def create_app(
     app.include_router(completions.router)
 
     # Health checker
-    health_checker = HealthChecker(node_manager)
+    health_checker = HealthChecker(node_manager, service_discovery)
 
     @app.on_event('startup')
     async def on_startup():

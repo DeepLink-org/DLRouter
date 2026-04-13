@@ -3,9 +3,24 @@
 from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
-from typing import Any, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
+from dlrouter.constants import ServiceDiscoveryMode
 from dlrouter.models.node import NodeStatus
+
+
+if TYPE_CHECKING:
+    from dlrouter.core.node_manager import NodeManager
+    from dlrouter.core.service_discovery.base import BaseServiceDiscovery
+
+
+@dataclass(frozen=True)
+class PDRequestContext:
+    """Context passed to backend-owned PD handlers."""
+
+    node_manager: 'NodeManager'
+    service_discovery: Optional['BaseServiceDiscovery'] = None
+    request_key: Optional[str] = None
 
 
 @dataclass
@@ -107,7 +122,7 @@ class BaseBackend(ABC):
         model_name: str,
         endpoint: str,
         stream: bool,
-        service_discovery: Any,
+        context: PDRequestContext,
     ) -> Any:
         """Handle request in PD disaggregation mode.
 
@@ -119,7 +134,7 @@ class BaseBackend(ABC):
             model_name: Requested model name.
             endpoint: API endpoint path.
             stream: Whether to stream response.
-            service_discovery: Backend-specific service discovery instance.
+            context: Backend-owned PD execution context.
 
         Returns:
             Response (StreamingResponse or JSONResponse).
@@ -216,17 +231,26 @@ class BaseBackend(ABC):
         """
         return {}
 
+    @classmethod
+    def create(cls, parsed_config: Any = None) -> 'BaseBackend':
+        """Create a backend instance from parsed configuration."""
+        return cls()
+
     def create_service_discovery(
         self,
+        discovery_mode: ServiceDiscoveryMode,
         backend_config: dict[str, Any],
-        node_manager: Any,
-    ) -> Any:
-        """Create service discovery component if needed.
+        node_manager: 'NodeManager',
+    ) -> Optional['BaseServiceDiscovery']:
+        """Create service discovery component for PD disaggregation.
 
-        Backends that require service discovery (e.g., vLLM PD mode)
-        should override this method.
+        Backends that support PD disaggregation should override this method.
+        The discovery_mode determines how Prefill/Decode instances are discovered:
+        - STATIC: Manual configuration via CLI/API
+        - HEARTBEAT: Instances send heartbeat messages
 
         Args:
+            discovery_mode: The service discovery mode to use.
             backend_config: Backend-specific configuration dict.
             node_manager: The NodeManager instance.
 

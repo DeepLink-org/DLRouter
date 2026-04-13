@@ -107,12 +107,16 @@ ignore_missing_imports = true
 # Per-module overrides for problematic files
 [[tool.mypy.overrides]]
 module = [
-    "dlrouter.backends.lmdeploy_backend",
-    "dlrouter.backends.vllm_backend",
+    "dlrouter.backends.lmdeploy",
+    "dlrouter.backends.lmdeploy.*",
+    "dlrouter.backends.vllm",
+    "dlrouter.backends.vllm.*",
     "dlrouter.backends.factory",
     "dlrouter.core.zmq_discovery",
+    "dlrouter.core.service_discovery.zmq_heartbeat",
     "dlrouter.core.health_check",
     "dlrouter.core.proxy_engine",
+    "dlrouter.core.node_manager",
     "dlrouter.api.*",
     "dlrouter.utils.request_key",
     "dlrouter.routing.factory",
