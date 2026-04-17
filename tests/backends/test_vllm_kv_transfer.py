@@ -1,8 +1,11 @@
 """Tests for vLLM KV transfer adapters."""
 
+import threading
+from unittest.mock import MagicMock
+
 from dlrouter.backends.vllm.kv_transfer import VLLMKVTransferAdapter
 from dlrouter.constants import EngineRole
-from dlrouter.core.service_discovery import NodeInfo
+from dlrouter.models.node import NodeStatus
 
 
 def test_vllm_build_prefill_request_forces_prefill_only_mode():
@@ -60,17 +63,26 @@ def test_vllm_inject_decode_request_merges_transfer_context():
 
 def test_vllm_build_request_id_returns_encoded_request_id():
     adapter = VLLMKVTransferAdapter()
-    prefill = NodeInfo(
-        http_address='10.0.0.1:13700',
-        zmq_address='10.0.0.1:30001',
-        role=EngineRole.PREFILL,
-    )
-    decode = NodeInfo(
-        http_address='10.0.0.2:13701',
-        zmq_address='10.0.0.2:30002',
-        role=EngineRole.DECODE,
-    )
+    nodes = {
+        'http://10.0.0.1:13700': NodeStatus(
+            role=EngineRole.PREFILL,
+            models=['test-model'],
+            zmq_address='10.0.0.1:30001',
+        ),
+        'http://10.0.0.2:13701': NodeStatus(
+            role=EngineRole.DECODE,
+            models=['test-model'],
+            zmq_address='10.0.0.2:30002',
+        ),
+    }
+    nm = MagicMock()
+    nm.nodes = nodes
+    nm._lock = threading.RLock()
 
-    request_id = adapter.build_request_id(prefill, decode)
+    request_id = adapter.build_request_id(
+        'http://10.0.0.1:13700',
+        'http://10.0.0.2:13701',
+        nm,
+    )
 
     assert request_id.startswith('___prefill_addr_10.0.0.1:30001___decode_addr_10.0.0.2:30002_')

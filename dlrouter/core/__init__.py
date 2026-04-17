@@ -8,7 +8,6 @@ from dlrouter.core.service_discovery import (
     NodeInfo,
     StaticServiceDiscovery,
     ZMQHeartbeatDiscovery,
-    create_service_discovery,
 )
 
 
@@ -20,5 +19,4 @@ __all__ = [
     'ProxyEngine',
     'StaticServiceDiscovery',
     'ZMQHeartbeatDiscovery',
-    'create_service_discovery',
 ]

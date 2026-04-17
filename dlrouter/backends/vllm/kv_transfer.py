@@ -7,7 +7,7 @@ from dlrouter.backends.vllm.request_id import build_encoded_request_id
 
 
 if TYPE_CHECKING:
-    from dlrouter.core.service_discovery.base import NodeInfo
+    from dlrouter.core.node_manager import NodeManager
 
 
 class KVTransferAdapter(ABC):
@@ -27,8 +27,9 @@ class KVTransferAdapter(ABC):
     @abstractmethod
     def build_request_id(
         self,
-        prefill_info: 'NodeInfo',
-        decode_info: 'NodeInfo',
+        prefill_url: str,
+        decode_url: str,
+        node_manager: 'NodeManager',
     ) -> str:
         """Build the connector-specific request id used across both stages."""
 
@@ -67,10 +68,11 @@ class VLLMKVTransferAdapter(KVTransferAdapter):
 
     def build_request_id(
         self,
-        prefill_info: 'NodeInfo',
-        decode_info: 'NodeInfo',
+        prefill_url: str,
+        decode_url: str,
+        node_manager: 'NodeManager',
     ) -> str:
-        return build_encoded_request_id(prefill_info, decode_info)
+        return build_encoded_request_id(prefill_url, decode_url, node_manager)
 
     def build_prefill_request(
         self,

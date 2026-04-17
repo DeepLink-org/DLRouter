@@ -16,9 +16,8 @@ class TestHandleDistServe:
         backend.handle_pd_request = AsyncMock(return_value='ok')
         node_manager = MagicMock()
         node_manager.backend = backend
-        discovery = object()
 
-        engine = ProxyEngine(node_manager, discovery)
+        engine = ProxyEngine(node_manager)
 
         response = await engine.handle_distserve(
             {'messages': []},
@@ -39,7 +38,6 @@ class TestHandleDistServe:
         )
         context = call.args[4]
         assert context.node_manager is node_manager
-        assert context.service_discovery is discovery
         assert context.request_key == 'tenant-1'
 
     @pytest.mark.asyncio

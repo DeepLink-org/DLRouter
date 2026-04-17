@@ -5,7 +5,7 @@ Backend-specific PD logic is delegated to the backend's handle_pd_request().
 """
 
 import json
-from typing import TYPE_CHECKING, Any, Optional, Union
+from typing import Any, Optional, Union
 
 from fastapi import BackgroundTasks
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -28,10 +28,6 @@ from dlrouter.models.protocol import (
 from dlrouter.utils.request_key import extract_request_key
 
 
-if TYPE_CHECKING:
-    from dlrouter.core.service_discovery.base import BaseServiceDiscovery
-
-
 logger = get_logger('dlrouter.proxy_engine')
 
 
@@ -45,10 +41,8 @@ class ProxyEngine:
     def __init__(
         self,
         node_manager: NodeManager,
-        service_discovery: Optional['BaseServiceDiscovery'] = None,
     ) -> None:
         self.manager = node_manager
-        self._service_discovery = service_discovery
 
     @property
     def backend(self):
@@ -167,7 +161,6 @@ class ProxyEngine:
                 stream,
                 PDRequestContext(
                     node_manager=self.manager,
-                    service_discovery=self._service_discovery,
                     request_key=request_key,
                 ),
             )
