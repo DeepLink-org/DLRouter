@@ -130,7 +130,7 @@ def create_app(
         )
 
     # Proxy engine
-    proxy_engine = ProxyEngine(node_manager, service_discovery)
+    proxy_engine = ProxyEngine(node_manager)
 
     # Inject dependencies into routes
     models.set_node_manager(node_manager)
@@ -145,7 +145,7 @@ def create_app(
     app.include_router(completions.router)
 
     # Health checker
-    health_checker = HealthChecker(node_manager, service_discovery)
+    health_checker = HealthChecker(node_manager)
 
     # Store references on app for external access
     app.state.node_manager = node_manager

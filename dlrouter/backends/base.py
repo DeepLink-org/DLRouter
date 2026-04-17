@@ -19,7 +19,6 @@ class PDRequestContext:
     """Context passed to backend-owned PD handlers."""
 
     node_manager: 'NodeManager'
-    service_discovery: Optional['BaseServiceDiscovery'] = None
     request_key: Optional[str] = None
 
 

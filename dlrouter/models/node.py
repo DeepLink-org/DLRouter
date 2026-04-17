@@ -57,6 +57,7 @@ class NodeStatus(BaseModel):
 
     role: EngineRole = EngineRole.HYBRID
     models: list[str] = Field(default_factory=list)
+    zmq_address: Optional[str] = None
     unfinished: int = 0
     latency: deque = Field(
         default_factory=lambda: deque(maxlen=LATENCY_DEQUE_LEN),

@@ -35,11 +35,6 @@ def get_backend_definition(backend_type: BackendType) -> BackendDefinition:
     return _BACKEND_REGISTRY[backend_type]
 
 
-def get_backend_class(backend_type: BackendType) -> type[BaseBackend]:
-    """Get the backend class for a given type."""
-    return get_backend_definition(backend_type).backend_cls
-
-
 def create_backend(
     backend_type: BackendType,
     backend_config: Optional[dict[str, Any]] = None,

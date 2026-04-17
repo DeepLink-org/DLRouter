@@ -17,7 +17,6 @@ from dlrouter.backends.vllm import (
     VLLMPDConfig,
 )
 from dlrouter.constants import BackendType, ServiceDiscoveryMode
-from dlrouter.core.service_discovery import NodeInfo
 
 
 NODE_URL = 'http://10.0.0.1:8000'
@@ -554,7 +553,6 @@ class TestCreateServiceDiscovery:
         assert isinstance(discovery, ZMQHeartbeatDiscovery)
         assert discovery._host == '127.0.0.1'
         assert discovery._port == 30002
-        assert discovery._ping_timeout == 10
         assert discovery._models == ['model-a', 'model-b']
         assert discovery._node_manager is mock_node_manager
 
@@ -572,8 +570,8 @@ class TestCreateServiceDiscovery:
 
         assert isinstance(discovery, StaticServiceDiscovery)
         assert discovery._models == []
-        assert discovery.get_prefill_count() == 0
-        assert discovery.get_decode_count() == 0
+        assert discovery._initial_prefill == []
+        assert discovery._initial_decode == []
 
     def test_creates_heartbeat_discovery_for_two_stage(self):
         backend = VLLMBackend.create(
@@ -612,36 +610,22 @@ class TestCreateServiceDiscovery:
 class TestHandlePDRequest:
     @staticmethod
     def _make_pd_pair():
-        return (
-            NodeInfo(
-                http_address='10.0.0.1:8200',
-                zmq_address='10.0.0.1:21001',
-            ),
-            NodeInfo(
-                http_address='10.0.0.2:8200',
-                zmq_address='10.0.0.2:22001',
-            ),
-        )
+        return ('http://10.0.0.1:8200', 'http://10.0.0.2:8200')
 
     @pytest.mark.asyncio
     async def test_handle_pd_request_no_pd_pair(self):
         """Test handle_pd_request when no P/D instances available."""
         backend = VLLMBackend()
-        mock_discovery = MagicMock()
-        mock_discovery.get_prefill_instances.return_value = []
-        mock_discovery.get_decode_instances.return_value = []
 
         response = await backend.handle_pd_request(
             {'model': 'test-model', 'messages': []},
             'test-model',
             '/v1/chat/completions',
             stream=False,
-            context=PDRequestContext(node_manager=MagicMock(), service_discovery=mock_discovery),
+            context=PDRequestContext(node_manager=MagicMock()),
         )
 
         assert response.status_code == 503
-        mock_discovery.get_prefill_instances.assert_called_once()
-        mock_discovery.get_decode_instances.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_handle_pd_request_uses_two_stage_by_default(self):
@@ -649,16 +633,12 @@ class TestHandlePDRequest:
         backend._build_two_stage_executor = MagicMock()
         backend._build_two_stage_executor.return_value.execute = AsyncMock(return_value='ok')
 
-        mock_discovery = MagicMock()
-        mock_discovery.get_prefill_instances.return_value = [self._make_pd_pair()[0]]
-        mock_discovery.get_decode_instances.return_value = [self._make_pd_pair()[1]]
-
         await backend.handle_pd_request(
             {'model': 'test-model', 'messages': []},
             'test-model',
             '/v1/chat/completions',
             stream=False,
-            context=PDRequestContext(node_manager=MagicMock(), service_discovery=mock_discovery),
+            context=PDRequestContext(node_manager=MagicMock()),
         )
 
         backend._build_two_stage_executor.return_value.execute.assert_awaited_once()
@@ -690,7 +670,7 @@ class TestLegacyProtocolRemoval:
             'test-model',
             '/v1/chat/completions',
             stream=False,
-            context=PDRequestContext(node_manager=MagicMock(), service_discovery=MagicMock()),
+            context=PDRequestContext(node_manager=MagicMock()),
         )
 
         assert response.status_code == 502
@@ -709,7 +689,7 @@ class TestLegacyProtocolRemoval:
             'test-model',
             '/v1/chat/completions',
             stream=False,
-            context=PDRequestContext(node_manager=MagicMock(), service_discovery=MagicMock()),
+            context=PDRequestContext(node_manager=MagicMock()),
         )
 
         assert response.status_code == 200
@@ -734,7 +714,7 @@ class TestLegacyProtocolRemoval:
             'test-model',
             '/v1/chat/completions',
             stream=True,
-            context=PDRequestContext(node_manager=MagicMock(), service_discovery=MagicMock()),
+            context=PDRequestContext(node_manager=MagicMock()),
         )
 
         assert isinstance(response, StreamingResponse)
@@ -754,7 +734,7 @@ class TestLegacyProtocolRemoval:
             'test-model',
             '/v1/chat/completions',
             stream=False,
-            context=PDRequestContext(node_manager=MagicMock(), service_discovery=MagicMock()),
+            context=PDRequestContext(node_manager=MagicMock()),
         )
 
         assert response.status_code == 502

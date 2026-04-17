@@ -18,7 +18,7 @@ A high-performance router / load balancer for large language model (LLM) inferen
 - **PD Disaggregation (DistServe)** — First-class support for LMDeploy's and vLLM's Prefill-Decode separation, with automatic PD connection management and migration request handling.
 - **Backend-Owned DistServe Flow** — `ProxyEngine` only dispatches DistServe requests; each backend owns its own PD orchestration (`LMDeploy` via `NodeManager`, `vLLM` via service discovery).
 - **Dynamic Node Management** — Register, remove, and terminate backend nodes at runtime via REST API.
-- **Automatic Health Checks** — Background heartbeat thread removes unhealthy nodes automatically.
+- **Automatic Health Checks** — Background heartbeat thread removes unhealthy nodes automatically. Includes lazy model discovery: if a node was registered before the backend was ready (models empty), the health checker fetches models once the node becomes healthy.
 - **API Key Authentication** — Optional Bearer token authentication for all endpoints.
 - **SSL / TLS Support** — Enable HTTPS via environment variables.
 - **Clear Discovery Semantics** — `HYBRID` nodes are added explicitly; `DISTSERVE` uses either `static` or `heartbeat` discovery for vLLM PD. In vLLM heartbeat mode, a node becomes routable only after model information is available.
@@ -75,7 +75,6 @@ DLRouter/
 │   │   ├── test_health_check.py             # Health checker tests
 │   │   ├── test_proxy_engine.py             # ProxyEngine delegation tests
 │   │   ├── test_service_discovery_factory.py # Discovery factory tests
-│   │   ├── test_service_discovery_registry.py # Unified registry tests
 │   │   ├── test_static_discovery.py         # Static discovery tests
 │   │   └── test_zmq_discovery.py            # ZMQ heartbeat discovery tests
 │   ├── routing/
@@ -155,12 +154,15 @@ python -m dlrouter --routing_strategy consistent_hash --api_keys "sk-abc123,sk-d
 python -m dlrouter --serving_strategy distserve --backend lmdeploy --link_type RoCE
 
 # vLLM PD disaggregation mode (heartbeat registration)
-python -m dlrouter --serving_strategy distserve --backend vllm --zmq_port 30001
+python -m dlrouter --serving_strategy distserve --backend vllm \
+  --zmq_port 30001 \
+  --models "qwen3-32b"
 
 # vLLM PD disaggregation mode (static P/D lists)
 python -m dlrouter --serving_strategy distserve --backend vllm \
   --prefill_urls "http://10.21.9.10:30000" \
-  --decode_urls "http://10.21.9.15:30000"
+  --decode_urls "http://10.21.9.15:30000" \
+  --models "qwen3-32b"
 
 # Use vLLM as backend in hybrid mode (register nodes via /nodes/add)
 python -m dlrouter --backend vllm
@@ -292,7 +294,9 @@ curl -X POST http://localhost:8000/v1/chat/completions \
 
 | Variable | Description |
 |---|---|
-| `DLROUTER_HEARTBEAT_EXPIRATION` | Heartbeat interval in seconds (default: `90`) |
+| `DLROUTER_HEARTBEAT_EXPIRATION` | Heartbeat / health-check interval in seconds (default: `90`) |
+| `DLROUTER_HEALTH_CHECK_TIMEOUT` | Per-node health-check HTTP timeout in seconds (default: `30`) |
+| `DLROUTER_HEALTH_CHECK_MAX_FAILURES` | Consecutive failures before a node is removed (default: `3`) |
 | `DLROUTER_AIOHTTP_TIMEOUT` | HTTP request timeout to backends in seconds (default: `1800`) |
 | `UVICORN_LOG_LEVEL` | Uvicorn log level (default: `info`) |
 | `SSL_KEYFILE` | Path to SSL key file (when `--ssl` is enabled) |
@@ -344,8 +348,6 @@ Client (OpenAI SDK / curl)
 
 **DistServe (PD Disaggregation) mode:**
 
-`ProxyEngine` does not implement backend-specific PD logic anymore. It delegates every DistServe request to `backend.handle_pd_request(...)`, passing a small context object with `NodeManager`, optional `service_discovery`, and `request_key`.
-
 *LMDeploy PD:*
 ```
 Client
@@ -360,8 +362,6 @@ DLRouter
   └─ 2. Decode  ──► D Node (Decode engine) ──► Response
 ```
 
-LMDeploy does not use a separate discovery component in DistServe mode. Prefill and decode nodes are selected from `NodeManager`, and the LMDeploy backend handles PD connection setup, migration request construction, and cleanup.
-
 *vLLM PD (ZMQ Service Discovery):*
 ```
 vLLM P/D Instances ──► ZMQ Register ──► DLRouter
@@ -375,8 +375,6 @@ Request ────► Prefill (max_tokens=1) ──► P Node
                   │
               Decode ──────────────────► D Node ──► Response
 ```
-
-vLLM DistServe keeps using backend-owned PD orchestration as well, but its node selection source is `service_discovery` rather than `NodeManager`. In heartbeat mode, a node is admitted only after model information has been resolved, so restarted nodes may briefly stay out of the routable set until their HTTP API is ready.
 
 ## Acknowledgements
 
