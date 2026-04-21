@@ -36,6 +36,7 @@ class BackendType(str, enum.Enum):
 
     LMDEPLOY = 'lmdeploy'
     VLLM = 'vllm'
+    SGLANG = 'sglang'
 
 
 class ServingStrategy(str, enum.Enum):

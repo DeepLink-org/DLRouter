@@ -8,6 +8,11 @@ from dlrouter.backends.lmdeploy import (
     LMDeployBackend,
     LMDeployPDConfig,
 )
+from dlrouter.backends.sglang import (
+    SGLANG_BACKEND_DEFINITION,
+    SGLangBackend,
+    SGLangPDConfig,
+)
 from dlrouter.backends.vllm import (
     VLLM_BACKEND_DEFINITION,
     VLLMBackend,
@@ -17,11 +22,14 @@ from dlrouter.backends.vllm import (
 
 __all__ = [
     'LMDEPLOY_BACKEND_DEFINITION',
+    'SGLANG_BACKEND_DEFINITION',
     'VLLM_BACKEND_DEFINITION',
     'BackendDefinition',
     'BaseBackend',
     'LMDeployBackend',
     'LMDeployPDConfig',
+    'SGLangBackend',
+    'SGLangPDConfig',
     'VLLMBackend',
     'VLLMPDConfig',
     'create_backend',

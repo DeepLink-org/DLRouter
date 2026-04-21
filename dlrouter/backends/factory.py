@@ -5,6 +5,7 @@ from typing import Any, Optional
 from dlrouter.backends.base import BaseBackend
 from dlrouter.backends.definition import BackendDefinition
 from dlrouter.backends.lmdeploy import LMDEPLOY_BACKEND_DEFINITION
+from dlrouter.backends.sglang import SGLANG_BACKEND_DEFINITION
 from dlrouter.backends.vllm import VLLM_BACKEND_DEFINITION
 from dlrouter.constants import BackendType
 
@@ -12,6 +13,7 @@ from dlrouter.constants import BackendType
 # Registry of backend definitions
 _BACKEND_REGISTRY: dict[BackendType, BackendDefinition] = {
     BackendType.LMDEPLOY: LMDEPLOY_BACKEND_DEFINITION,
+    BackendType.SGLANG: SGLANG_BACKEND_DEFINITION,
     BackendType.VLLM: VLLM_BACKEND_DEFINITION,
 }
 
