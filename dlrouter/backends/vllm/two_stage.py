@@ -40,6 +40,7 @@ class VLLMTwoStagePDExecutor:
         pd_pair = self.pair_selector.select_pair(
             node_manager=node_manager,
             model_name=request_data.get('model', ''),
+            request_key=context.request_key,
         )
         if pd_pair is None:
             return JSONResponse(

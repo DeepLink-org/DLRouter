@@ -69,7 +69,7 @@ class BaseBackend(ABC):
         """
 
     @abstractmethod
-    async def stream_forward(
+    def stream_forward(
         self,
         node_url: str,
         endpoint: str,
@@ -216,7 +216,7 @@ class BaseBackend(ABC):
         return []
 
     @classmethod
-    def parse_config(cls, **kwargs) -> dict[str, Any]:
+    def parse_config(cls, **kwargs: Any) -> Any:
         """Parse and validate backend-specific config from CLI args.
 
         Subclasses should override this to construct their

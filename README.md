@@ -15,13 +15,14 @@ A high-performance router / load balancer for large language model (LLM) inferen
 - **Multi-Backend Architecture** — Pluggable backend adapters via the `BaseBackend` interface. Currently supported:
   - **LMDeploy** (including PD disaggregation / DistServe)
   - **vLLM** (hybrid OpenAI-compatible forwarding via explicitly registered nodes, plus DistServe two-stage PD orchestration with static or heartbeat discovery)
-- **PD Disaggregation (DistServe)** — First-class support for LMDeploy's and vLLM's Prefill-Decode separation, with automatic PD connection management and migration request handling.
-- **Backend-Owned DistServe Flow** — `ProxyEngine` only dispatches DistServe requests; each backend owns its own PD orchestration (`LMDeploy` via `NodeManager`, `vLLM` via service discovery).
+  - **SGLang** (DistServe static PD proxy using SGLang bootstrap dual dispatch)
+- **PD Disaggregation (DistServe)** — First-class support for LMDeploy, vLLM, and SGLang Prefill-Decode separation.
+- **Backend-Owned DistServe Flow** — `ProxyEngine` only dispatches DistServe requests; each backend owns its own PD orchestration (`LMDeploy` via `NodeManager`, `vLLM` via two-stage transfer, `SGLang` via bootstrap dual dispatch).
 - **Dynamic Node Management** — Register, remove, and terminate backend nodes at runtime via REST API.
 - **Automatic Health Checks** — Background heartbeat thread removes unhealthy nodes automatically. Includes lazy model discovery: if a node was registered before the backend was ready (models empty), the health checker fetches models once the node becomes healthy.
 - **API Key Authentication** — Optional Bearer token authentication for all endpoints.
 - **SSL / TLS Support** — Enable HTTPS via environment variables.
-- **Clear Discovery Semantics** — `HYBRID` nodes are added explicitly; `DISTSERVE` uses either `static` or `heartbeat` discovery for vLLM PD. In vLLM heartbeat mode, a node becomes routable only after model information is available.
+- **Clear Discovery Semantics** — `HYBRID` nodes are added explicitly; `DISTSERVE` uses backend-specific discovery. vLLM supports `static` or `heartbeat`; SGLang currently uses static P/D URL lists.
 
 ## Project Structure
 
@@ -43,6 +44,7 @@ DLRouter/
 │   ├── backends/
 │   │   ├── base.py            # Abstract backend interface
 │   │   ├── lmdeploy/          # LMDeploy backend package (+ PD disagg)
+│   │   ├── sglang/            # SGLang backend package (+ bootstrap PD proxy)
 │   │   ├── vllm/              # vLLM backend package
 │   │   └── factory.py         # Backend factory
 │   ├── core/
@@ -66,6 +68,9 @@ DLRouter/
 │   │   ├── test_backend_contracts.py   # Backend interface contract tests
 │   │   ├── test_backend_definitions.py # Backend definition tests
 │   │   ├── test_lmdeploy_backend.py    # LMDeploy backend PD tests
+│   │   ├── test_sglang_backend.py      # SGLang backend unit tests
+│   │   ├── test_sglang_dual_dispatch.py # SGLang PD dual-dispatch tests
+│   │   ├── test_sglang_transfer.py     # SGLang bootstrap injection tests
 │   │   ├── test_vllm_backend.py        # vLLM backend unit tests
 │   │   ├── test_vllm_kv_transfer.py    # KV transfer adapter tests
 │   │   ├── test_vllm_pair_selection.py # PD pair selection tests
@@ -115,7 +120,7 @@ dlrouter
 |---|---|---|
 | `--server_name` | `0.0.0.0` | Bind address |
 | `--server_port` | `8000` | Listen port |
-| `--backend` | `lmdeploy` | Backend type (`lmdeploy` / `vllm`) |
+| `--backend` | `lmdeploy` | Backend type (`lmdeploy` / `vllm` / `sglang`) |
 | `--routing_strategy` | `min_expected_latency` | Routing strategy (see below) |
 | `--serving_strategy` | `hybrid` | Serving mode (`hybrid` / `distserve`) |
 | `--api_keys` | `None` | Comma-separated API keys for auth |
@@ -141,6 +146,12 @@ dlrouter
 | `--decode_urls` | `None` | Comma-separated decode URLs (when set together with `--prefill_urls`, DLRouter infers static mode) |
 | `--models` | `None` | Comma-separated model names (optional, auto-fetched from nodes) |
 
+*SGLang options:*
+| `--prefill_urls` | `None` | Comma-separated SGLang prefill HTTP URLs; required with `--decode_urls` in DistServe mode |
+| `--decode_urls` | `None` | Comma-separated SGLang decode HTTP URLs; required with `--prefill_urls` in DistServe mode |
+| `--prefill_bootstrap_ports` | `8998 per prefill` | Comma-separated bootstrap ports aligned with `--prefill_urls` |
+| `--models` | `None` | Comma-separated model names (optional, auto-fetched from nodes) |
+
 ### Examples
 
 ```bash
@@ -162,6 +173,13 @@ python -m dlrouter --serving_strategy distserve --backend vllm \
 python -m dlrouter --serving_strategy distserve --backend vllm \
   --prefill_urls "http://10.21.9.10:30000" \
   --decode_urls "http://10.21.9.15:30000" \
+  --models "qwen3-32b"
+
+# SGLang PD disaggregation mode (static P/D lists + bootstrap dual dispatch)
+python -m dlrouter --serving_strategy distserve --backend sglang \
+  --prefill_urls "http://10.21.9.10:13700" \
+  --decode_urls "http://10.21.9.15:13701" \
+  --prefill_bootstrap_ports "8998" \
   --models "qwen3-32b"
 
 # Use vLLM as backend in hybrid mode (register nodes via /nodes/add)
@@ -230,6 +248,29 @@ python -m dlrouter \
   --disable_cache_status
 ```
 
+## SGLang Usage
+
+### SGLang DistServe
+
+Use `distserve` with SGLang when prefill and decode servers are already launched separately with SGLang PD/NIXL enabled.
+
+- SGLang currently uses static discovery in DLRouter: provide both `--prefill_urls` and `--decode_urls`.
+- `--prefill_bootstrap_ports` is aligned with `--prefill_urls`; if omitted, each prefill defaults to `8998`.
+- DLRouter injects `bootstrap_host`, `bootstrap_port`, and `bootstrap_room` into the request body.
+- DLRouter sends the same bootstrap-decorated request to prefill and decode concurrently, then returns the decode response.
+- This is different from vLLM two-stage PD, which uses a prefill request first, extracts KV transfer context, then sends decode with `X-Request-Id` / transfer metadata.
+
+```bash
+python -m dlrouter \
+  --serving_strategy distserve \
+  --backend sglang \
+  --prefill_urls "http://10.201.6.52:13700" \
+  --decode_urls "http://10.201.6.52:13701" \
+  --prefill_bootstrap_ports "8998" \
+  --models "Qwen3-32B" \
+  --disable_cache_status
+```
+
 ## API Reference
 
 ### Inference Endpoints
@@ -256,6 +297,7 @@ python -m dlrouter \
 - `HYBRID`: backend instances are registered explicitly, typically via `/nodes/add` or direct `NodeManager.add(...)`.
 - `DISTSERVE + vLLM`: providing both `prefill_urls` and `decode_urls` selects `static`; providing neither selects `heartbeat`.
 - `DISTSERVE + vLLM + heartbeat`: a node enters the routable set only after DLRouter has resolved its model information.
+- `DISTSERVE + SGLang`: providing both `prefill_urls` and `decode_urls` selects static SGLang PD proxying; heartbeat discovery is not used.
 - `DISTSERVE + LMDeploy`: Prefill/Decode nodes are still selected from `NodeManager`; no separate discovery component is created.
 
 ### Usage Example
@@ -376,12 +418,25 @@ Request ────► Prefill (max_tokens=1) ──► P Node
               Decode ──────────────────► D Node ──► Response
 ```
 
+*SGLang PD (Static Bootstrap Dual Dispatch):*
+```
+Client ────────────────────────────────► DLRouter
+                                            │
+                                            ▼
+Request + bootstrap_host/port/room ──┬──► P Node
+                                     │      │
+                                     │   SGLang KV bootstrap / NIXL
+                                     │      │
+                                     └──► D Node ──► Response
+```
+
 ## Acknowledgements
 
 This project draws inspiration from the following open-source projects:
 
 - **[LMDeploy](https://github.com/InternLM/lmdeploy)** — The proxy implementation in `lmdeploy/serve/proxy/proxy.py` provided valuable reference for the routing architecture and PD disaggregation support.
 - **[vLLM](https://github.com/vllm-project/vllm)** — The implementation of load balancing policies such as cache_aware in VLLM routers provides us with many references.
+- **[SGLang](https://github.com/sgl-project/sglang)** — SGLang's router and mini load balancer informed the bootstrap dual-dispatch PD proxy flow.
 
 We extend our sincere thanks to the developers and contributors of these projects for their excellent work in the LLM inference ecosystem.
 

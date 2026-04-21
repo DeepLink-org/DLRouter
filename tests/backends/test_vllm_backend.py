@@ -616,13 +616,15 @@ class TestHandlePDRequest:
     async def test_handle_pd_request_no_pd_pair(self):
         """Test handle_pd_request when no P/D instances available."""
         backend = VLLMBackend()
+        node_manager = MagicMock()
+        node_manager.get_node_url.return_value = None
 
         response = await backend.handle_pd_request(
             {'model': 'test-model', 'messages': []},
             'test-model',
             '/v1/chat/completions',
             stream=False,
-            context=PDRequestContext(node_manager=MagicMock()),
+            context=PDRequestContext(node_manager=node_manager),
         )
 
         assert response.status_code == 503

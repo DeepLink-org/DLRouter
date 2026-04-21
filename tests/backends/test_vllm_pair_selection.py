@@ -39,6 +39,12 @@ def _make_node_manager(
     # Wire up prefill_nodes / decode_nodes properties
     nm.prefill_nodes = {url: st for url, st in nodes.items() if st.role == EngineRole.PREFILL}
     nm.decode_nodes = {url: st for url, st in nodes.items() if st.role == EngineRole.DECODE}
+
+    def get_node_url(model_name: str, role: EngineRole = EngineRole.HYBRID, request_key: str | None = None):
+        candidates = {url: st for url, st in nodes.items() if st.role == role}
+        return nm._router.select_node(model_name, candidates, request_key)
+
+    nm.get_node_url.side_effect = get_node_url
     return nm
 
 
@@ -116,6 +122,22 @@ def test_select_pair_uses_node_manager_router() -> None:
     assert pair[0] == 'http://10.0.0.2:13700'
     assert pair[1] == 'http://10.0.0.1:13701'
     assert mock_router.select_node.call_count == 2
+
+
+def test_select_pair_passes_request_key_to_node_manager() -> None:
+    selector = VLLMPairSelector()
+    nm = MagicMock()
+    nm.get_node_url.side_effect = ['http://prefill:8000', 'http://decode:8000']
+
+    pair = selector.select_pair(
+        node_manager=nm,
+        model_name='qwen3-32b',
+        request_key='session-123',
+    )
+
+    assert pair == ('http://prefill:8000', 'http://decode:8000')
+    assert nm.get_node_url.call_args_list[0].kwargs['request_key'] == 'session-123'
+    assert nm.get_node_url.call_args_list[1].kwargs['request_key'] == 'session-123'
 
 
 def test_select_pair_rotates_with_round_robin() -> None:

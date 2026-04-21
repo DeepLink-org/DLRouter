@@ -35,6 +35,12 @@ def _make_node_manager():
     nm.prefill_nodes = {url: st for url, st in nodes.items() if st.role == EngineRole.PREFILL}
     nm.decode_nodes = {url: st for url, st in nodes.items() if st.role == EngineRole.DECODE}
     nm.pre_call.return_value = 1000.0
+
+    def get_node_url(model_name: str, role: EngineRole = EngineRole.HYBRID, request_key: str | None = None):
+        candidates = {url: st for url, st in nodes.items() if st.role == role}
+        return nm._router.select_node(model_name, candidates, request_key)
+
+    nm.get_node_url.side_effect = get_node_url
     return nm
 
 
@@ -46,6 +52,7 @@ def _make_empty_node_manager():
     nm._router = RoundRobinStrategy()
     nm.prefill_nodes = {}
     nm.decode_nodes = {}
+    nm.get_node_url.return_value = None
     return nm
 
 
@@ -110,6 +117,42 @@ async def test_execute_non_stream_uses_same_encoded_request_id_for_prefill_and_d
 
     assert first_request_id == second_request_id
     assert first_request_id.startswith('___prefill_addr_10.0.0.1:30001___decode_addr_10.0.0.2:30002_')
+
+
+@pytest.mark.asyncio
+async def test_execute_passes_request_key_to_pair_selector():
+    backend = MagicMock()
+    backend.forward_with_request_id = AsyncMock(
+        side_effect=[
+            '{"kv_transfer_params": {"remote_host": "10.0.0.9", "remote_port": 20001}}',
+            '{"id": "cmpl-1", "choices": [{"text": "hello"}]}',
+        ]
+    )
+    pair_selector = MagicMock()
+    pair_selector.select_pair.return_value = ('http://10.0.0.1:13700', 'http://10.0.0.2:13701')
+    node_manager = _make_node_manager()
+    executor = VLLMTwoStagePDExecutor(
+        backend=backend,
+        adapter=VLLMKVTransferAdapter(),
+        pair_selector=pair_selector,
+    )
+
+    response = await executor.execute(
+        request_data={'model': 'qwen3-32b', 'messages': []},
+        endpoint='/v1/chat/completions',
+        stream=False,
+        context=PDRequestContext(
+            node_manager=node_manager,
+            request_key='session-123',
+        ),
+    )
+
+    assert response.status_code == 200
+    pair_selector.select_pair.assert_called_once_with(
+        node_manager=node_manager,
+        model_name='qwen3-32b',
+        request_key='session-123',
+    )
 
 
 @pytest.mark.asyncio
