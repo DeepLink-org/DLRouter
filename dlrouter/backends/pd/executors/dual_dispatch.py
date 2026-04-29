@@ -1,39 +1,37 @@
-"""Dual-dispatch PD executor for the SGLang backend."""
+"""Shared dual-dispatch PD executor."""
 
 from __future__ import annotations
 
 import asyncio
 import json
+from contextlib import suppress
 from typing import TYPE_CHECKING, Any
 
 from fastapi.responses import JSONResponse, StreamingResponse
 
-from dlrouter.backends.sglang.pair_selection import SGLangPairSelector
-from dlrouter.logger import get_logger
+from dlrouter.backends.pd.selection import PDPairSelector, no_pd_pair_response
+from dlrouter.core.node_lifecycle import post_call, pre_call
 
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
 
     from dlrouter.backends.base import PDRequestContext
-    from dlrouter.backends.sglang.transfer import SGLangBootstrapAdapter
+    from dlrouter.backends.pd.protocols import DualDispatchAdapter, DualDispatchTransport
 
 
-logger = get_logger('dlrouter.sglang.dual_dispatch')
-
-
-class SGLangDualDispatchExecutor:
-    """Execute SGLang PD by sending the routed request to P and D together."""
+class DualDispatchExecutor:
+    """Execute PD by sending the same routed request to prefill and decode."""
 
     def __init__(
         self,
-        backend: Any,
-        adapter: SGLangBootstrapAdapter,
-        pair_selector: SGLangPairSelector | None = None,
+        transport: DualDispatchTransport,
+        adapter: DualDispatchAdapter,
+        pair_selector: PDPairSelector | None = None,
     ) -> None:
-        self.backend = backend
+        self.transport = transport
         self.adapter = adapter
-        self.pair_selector = pair_selector or SGLangPairSelector()
+        self.pair_selector = pair_selector or PDPairSelector()
 
     async def execute(
         self,
@@ -42,19 +40,17 @@ class SGLangDualDispatchExecutor:
         stream: bool,
         context: PDRequestContext,
     ) -> Any:
-        """Execute SGLang PD dual dispatch."""
+        """Execute a dual-dispatch PD request."""
         pd_pair = self.pair_selector.select_pair(
             node_manager=context.node_manager,
             model_name=request_data.get('model', ''),
             request_key=context.request_key,
         )
         if pd_pair is None:
-            return JSONResponse(
-                {'error': 'No prefill or decode instances available'},
-                status_code=503,
-            )
+            return no_pd_pair_response()
 
-        prefill_url, decode_url = pd_pair
+        prefill_url = pd_pair.prefill_url
+        decode_url = pd_pair.decode_url
         routed_request = self.adapter.build_request(
             request_data,
             prefill_url=prefill_url,
@@ -115,8 +111,10 @@ class SGLangDualDispatchExecutor:
             ):
                 yield chunk
             await prefill_task
-        except Exception:
+        except (asyncio.CancelledError, Exception):
             prefill_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await prefill_task
             raise
 
     async def _forward_tracked(
@@ -128,7 +126,7 @@ class SGLangDualDispatchExecutor:
     ) -> Any:
         start = self._pre_call(node_manager, node_url)
         try:
-            return await self.backend.forward_request(node_url, endpoint, request_data)
+            return await self.transport.forward_request(node_url, endpoint, request_data)
         finally:
             self._post_call(node_manager, node_url, start)
 
@@ -141,7 +139,7 @@ class SGLangDualDispatchExecutor:
     ) -> AsyncIterator[bytes]:
         start = self._pre_call(node_manager, node_url)
         try:
-            async for chunk in self.backend.stream_forward(
+            async for chunk in self.transport.stream_forward(
                 node_url,
                 endpoint,
                 request_data,
@@ -153,18 +151,9 @@ class SGLangDualDispatchExecutor:
     @staticmethod
     def _pre_call(node_manager: Any, node_url: str) -> float | None:
         """Track request start on a node for load-aware routing."""
-        try:
-            return node_manager.pre_call(node_url)
-        except (KeyError, AttributeError):
-            logger.debug(f'pre_call skipped: {node_url} not in NodeManager')
-            return None
+        return pre_call(node_manager, node_url)
 
     @staticmethod
     def _post_call(node_manager: Any, node_url: str, start: float | None) -> None:
         """Track request end on a node for load-aware routing."""
-        if start is None:
-            return
-        try:
-            node_manager.post_call(node_url, start)
-        except (KeyError, AttributeError):
-            logger.debug(f'post_call skipped: {node_url} not in NodeManager')
+        post_call(node_manager, node_url, start)

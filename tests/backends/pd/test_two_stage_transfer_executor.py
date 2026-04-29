@@ -1,4 +1,4 @@
-"""Tests for the vLLM two-stage PD executor."""
+"""Tests for the shared two-stage transfer PD executor."""
 
 import threading
 from unittest.mock import AsyncMock, MagicMock
@@ -7,8 +7,8 @@ import pytest
 from fastapi.responses import StreamingResponse
 
 from dlrouter.backends.base import PDRequestContext
+from dlrouter.backends.pd import PDPair, TwoStageTransferExecutor
 from dlrouter.backends.vllm.kv_transfer import VLLMKVTransferAdapter
-from dlrouter.backends.vllm.two_stage import VLLMTwoStagePDExecutor
 from dlrouter.constants import EngineRole
 from dlrouter.models.node import NodeStatus
 from dlrouter.routing.round_robin import RoundRobinStrategy
@@ -63,16 +63,16 @@ async def _aiter(chunks):
 
 @pytest.mark.asyncio
 async def test_execute_non_stream_success_returns_json_response():
-    backend = MagicMock()
-    backend.forward_with_request_id = AsyncMock(
+    transport = MagicMock()
+    transport.forward_with_request_id = AsyncMock(
         side_effect=[
             '{"kv_transfer_params": {"remote_host": "10.0.0.9", "remote_port": 20001}}',
             '{"id": "cmpl-1", "choices": [{"text": "hello"}]}',
         ]
     )
     node_manager = _make_node_manager()
-    executor = VLLMTwoStagePDExecutor(
-        backend=backend,
+    executor = TwoStageTransferExecutor(
+        transport=transport,
         adapter=VLLMKVTransferAdapter(),
     )
 
@@ -84,21 +84,21 @@ async def test_execute_non_stream_success_returns_json_response():
     )
 
     assert response.status_code == 200
-    assert backend.forward_with_request_id.await_count == 2
+    assert transport.forward_with_request_id.await_count == 2
 
 
 @pytest.mark.asyncio
 async def test_execute_non_stream_uses_same_encoded_request_id_for_prefill_and_decode():
-    backend = MagicMock()
-    backend.forward_with_request_id = AsyncMock(
+    transport = MagicMock()
+    transport.forward_with_request_id = AsyncMock(
         side_effect=[
             '{"kv_transfer_params": {"remote_host": "10.0.0.9", "remote_port": 20001}}',
             '{"id": "cmpl-1", "choices": [{"text": "hello"}]}',
         ]
     )
     node_manager = _make_node_manager()
-    executor = VLLMTwoStagePDExecutor(
-        backend=backend,
+    executor = TwoStageTransferExecutor(
+        transport=transport,
         adapter=VLLMKVTransferAdapter(),
     )
 
@@ -110,10 +110,10 @@ async def test_execute_non_stream_uses_same_encoded_request_id_for_prefill_and_d
     )
 
     assert response.status_code == 200
-    assert backend.forward_with_request_id.await_count == 2
+    assert transport.forward_with_request_id.await_count == 2
 
-    first_request_id = backend.forward_with_request_id.await_args_list[0].args[3]
-    second_request_id = backend.forward_with_request_id.await_args_list[1].args[3]
+    first_request_id = transport.forward_with_request_id.await_args_list[0].args[3]
+    second_request_id = transport.forward_with_request_id.await_args_list[1].args[3]
 
     assert first_request_id == second_request_id
     assert first_request_id.startswith('___prefill_addr_10.0.0.1:30001___decode_addr_10.0.0.2:30002_')
@@ -121,18 +121,18 @@ async def test_execute_non_stream_uses_same_encoded_request_id_for_prefill_and_d
 
 @pytest.mark.asyncio
 async def test_execute_passes_request_key_to_pair_selector():
-    backend = MagicMock()
-    backend.forward_with_request_id = AsyncMock(
+    transport = MagicMock()
+    transport.forward_with_request_id = AsyncMock(
         side_effect=[
             '{"kv_transfer_params": {"remote_host": "10.0.0.9", "remote_port": 20001}}',
             '{"id": "cmpl-1", "choices": [{"text": "hello"}]}',
         ]
     )
     pair_selector = MagicMock()
-    pair_selector.select_pair.return_value = ('http://10.0.0.1:13700', 'http://10.0.0.2:13701')
+    pair_selector.select_pair.return_value = PDPair('http://10.0.0.1:13700', 'http://10.0.0.2:13701')
     node_manager = _make_node_manager()
-    executor = VLLMTwoStagePDExecutor(
-        backend=backend,
+    executor = TwoStageTransferExecutor(
+        transport=transport,
         adapter=VLLMKVTransferAdapter(),
         pair_selector=pair_selector,
     )
@@ -157,16 +157,16 @@ async def test_execute_passes_request_key_to_pair_selector():
 
 @pytest.mark.asyncio
 async def test_execute_non_stream_continues_without_transfer_context():
-    backend = MagicMock()
-    backend.forward_with_request_id = AsyncMock(
+    transport = MagicMock()
+    transport.forward_with_request_id = AsyncMock(
         side_effect=[
             '{"kv_transfer_params": null}',
             '{"id": "cmpl-1", "choices": [{"text": "hello"}]}',
         ]
     )
     node_manager = _make_node_manager()
-    executor = VLLMTwoStagePDExecutor(
-        backend=backend,
+    executor = TwoStageTransferExecutor(
+        transport=transport,
         adapter=VLLMKVTransferAdapter(),
     )
 
@@ -178,18 +178,18 @@ async def test_execute_non_stream_continues_without_transfer_context():
     )
 
     assert response.status_code == 200
-    assert backend.forward_with_request_id.await_count == 2
+    assert transport.forward_with_request_id.await_count == 2
 
-    decode_request = backend.forward_with_request_id.await_args_list[1].args[2]
+    decode_request = transport.forward_with_request_id.await_args_list[1].args[2]
     assert decode_request == {'model': 'qwen3-32b', 'messages': []}
 
 
 @pytest.mark.asyncio
 async def test_execute_non_stream_returns_503_when_no_pd_pair():
-    backend = MagicMock()
+    transport = MagicMock()
     node_manager = _make_empty_node_manager()
-    executor = VLLMTwoStagePDExecutor(
-        backend=backend,
+    executor = TwoStageTransferExecutor(
+        transport=transport,
         adapter=VLLMKVTransferAdapter(),
     )
 
@@ -205,16 +205,16 @@ async def test_execute_non_stream_returns_503_when_no_pd_pair():
 
 @pytest.mark.asyncio
 async def test_execute_stream_returns_streaming_response():
-    backend = MagicMock()
-    backend.forward_with_request_id = AsyncMock(
+    transport = MagicMock()
+    transport.forward_with_request_id = AsyncMock(
         return_value='{"kv_transfer_params": {"remote_host": "10.0.0.9", "remote_port": 20001}}'
     )
-    backend.stream_forward_with_request_id = MagicMock(
+    transport.stream_forward_with_request_id = MagicMock(
         return_value=_aiter([b'data: {"choices":[{"delta":{"content":"hello"},"stop_reason":null}]}\n\n'])
     )
     node_manager = _make_node_manager()
-    executor = VLLMTwoStagePDExecutor(
-        backend=backend,
+    executor = TwoStageTransferExecutor(
+        transport=transport,
         adapter=VLLMKVTransferAdapter(),
     )
 
@@ -231,8 +231,8 @@ async def test_execute_stream_returns_streaming_response():
 @pytest.mark.asyncio
 async def test_execute_non_stream_calls_pre_call_and_post_call():
     """Verify pre_call/post_call are invoked for both prefill and decode phases."""
-    backend = MagicMock()
-    backend.forward_with_request_id = AsyncMock(
+    transport = MagicMock()
+    transport.forward_with_request_id = AsyncMock(
         side_effect=[
             '{"kv_transfer_params": {"remote_host": "10.0.0.9"}}',
             '{"id": "cmpl-1", "choices": [{"text": "hi"}]}',
@@ -241,8 +241,8 @@ async def test_execute_non_stream_calls_pre_call_and_post_call():
 
     node_manager = _make_node_manager()
 
-    executor = VLLMTwoStagePDExecutor(
-        backend=backend,
+    executor = TwoStageTransferExecutor(
+        transport=transport,
         adapter=VLLMKVTransferAdapter(),
     )
 
@@ -253,14 +253,12 @@ async def test_execute_non_stream_calls_pre_call_and_post_call():
         context=PDRequestContext(node_manager=node_manager),
     )
 
-    # pre_call called for prefill and decode
     assert node_manager.pre_call.call_count == 2
     prefill_url = node_manager.pre_call.call_args_list[0].args[0]
     decode_url = node_manager.pre_call.call_args_list[1].args[0]
     assert prefill_url == 'http://10.0.0.1:13700'
     assert decode_url == 'http://10.0.0.2:13701'
 
-    # post_call called for prefill and decode
     assert node_manager.post_call.call_count == 2
     assert node_manager.post_call.call_args_list[0].args[0] == 'http://10.0.0.1:13700'
     assert node_manager.post_call.call_args_list[1].args[0] == 'http://10.0.0.2:13701'

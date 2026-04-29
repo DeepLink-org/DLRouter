@@ -6,11 +6,13 @@ import pytest
 
 from dlrouter.backends.base import PDRequestContext
 from dlrouter.backends.factory import create_backend, get_backend_definition
+from dlrouter.backends.pd import DualDispatchExecutor
 from dlrouter.backends.sglang import (
     SGLANG_BACKEND_DEFINITION,
     SGLangBackend,
     SGLangPDConfig,
 )
+from dlrouter.backends.sglang.bootstrap import SGLangBootstrapAdapter
 from dlrouter.constants import BackendType, ServiceDiscoveryMode
 
 
@@ -182,7 +184,8 @@ class TestForwarding:
         ):
             assert SGLangBackend().fetch_models('http://10.0.0.1:8100') == ['Qwen3-4B']
 
-    async def test_handle_pd_request_uses_dual_dispatch_executor(self):
+    @pytest.mark.asyncio
+    async def test_handle_pd_request_uses_cached_dual_dispatch_executor(self):
         backend = SGLangBackend(
             SGLangPDConfig(
                 prefill_urls=['http://10.0.0.1:8100'],
@@ -193,7 +196,7 @@ class TestForwarding:
         )
         executor = MagicMock()
         executor.execute = AsyncMock(return_value='ok')
-        backend._build_dual_dispatch_executor = MagicMock(return_value=executor)
+        backend._get_dual_dispatch_executor = MagicMock(return_value=executor)
 
         result = await backend.handle_pd_request(
             request_data={'model': 'Qwen3-4B'},
@@ -204,4 +207,39 @@ class TestForwarding:
         )
 
         assert result == 'ok'
+        backend._get_dual_dispatch_executor.assert_called_once()
         executor.execute.assert_awaited_once()
+
+    def test_get_dual_dispatch_executor_caches_instance(self):
+        backend = SGLangBackend(
+            SGLangPDConfig(
+                prefill_urls=['http://10.0.0.1:8100'],
+                decode_urls=['http://10.0.0.2:8200'],
+                prefill_bootstrap_ports=[8998],
+                models=['Qwen3-4B'],
+            )
+        )
+        backend._build_dual_dispatch_executor = MagicMock(wraps=backend._build_dual_dispatch_executor)
+
+        first = backend._get_dual_dispatch_executor()
+        second = backend._get_dual_dispatch_executor()
+
+        assert first is second
+        backend._build_dual_dispatch_executor.assert_called_once()
+
+    def test_build_dual_dispatch_executor_wires_transport_and_bootstrap_adapter(self):
+        backend = SGLangBackend(
+            SGLangPDConfig(
+                prefill_urls=['http://10.0.0.1:8100'],
+                decode_urls=['http://10.0.0.2:8200'],
+                prefill_bootstrap_ports=[8998],
+                models=['Qwen3-4B'],
+            )
+        )
+
+        executor = backend._build_dual_dispatch_executor()
+
+        assert isinstance(executor, DualDispatchExecutor)
+        assert executor.transport is backend
+        assert isinstance(executor.adapter, SGLangBootstrapAdapter)
+        assert executor.adapter.bootstrap_ports_by_url == {'http://10.0.0.1:8100': 8998}

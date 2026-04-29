@@ -19,6 +19,7 @@ from dlrouter.logger import get_logger
 
 
 if TYPE_CHECKING:
+    from dlrouter.backends.pd import DualDispatchExecutor
     from dlrouter.core.node_manager import NodeManager
     from dlrouter.core.service_discovery.base import BaseServiceDiscovery
 
@@ -37,6 +38,7 @@ class SGLangBackend(BaseBackend):
         self._health_timeout = aiohttp.ClientTimeout(total=HEALTH_CHECK_TIMEOUT)
         self._session: Optional[aiohttp.ClientSession] = None
         self._session_lock: Optional[asyncio.Lock] = None
+        self._dual_dispatch_executor: Optional[DualDispatchExecutor] = None
 
     @classmethod
     def create(cls, parsed_config: Any = None) -> 'SGLangBackend':
@@ -245,17 +247,23 @@ class SGLangBackend(BaseBackend):
         context: PDRequestContext,
     ) -> Any:
         """Handle request in SGLang PD disaggregation mode."""
-        return await self._build_dual_dispatch_executor().execute(
+        return await self._get_dual_dispatch_executor().execute(
             request_data=request_data,
             endpoint=endpoint,
             stream=stream,
             context=context,
         )
 
-    def _build_dual_dispatch_executor(self) -> Any:
+    def _get_dual_dispatch_executor(self) -> 'DualDispatchExecutor':
+        """Return the cached SGLang dual-dispatch executor."""
+        if self._dual_dispatch_executor is None:
+            self._dual_dispatch_executor = self._build_dual_dispatch_executor()
+        return self._dual_dispatch_executor
+
+    def _build_dual_dispatch_executor(self) -> 'DualDispatchExecutor':
         """Build the configured SGLang dual-dispatch executor."""
-        from dlrouter.backends.sglang.dual_dispatch import SGLangDualDispatchExecutor
-        from dlrouter.backends.sglang.transfer import SGLangBootstrapAdapter
+        from dlrouter.backends.pd import DualDispatchExecutor
+        from dlrouter.backends.sglang.bootstrap import SGLangBootstrapAdapter
 
         port_map: dict[str, Optional[int]] = dict(
             zip(
@@ -263,8 +271,8 @@ class SGLangBackend(BaseBackend):
                 self.pd_config.prefill_bootstrap_ports,
             )
         )
-        return SGLangDualDispatchExecutor(
-            backend=self,
+        return DualDispatchExecutor(
+            transport=self,
             adapter=SGLangBootstrapAdapter(port_map),
         )
 

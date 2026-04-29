@@ -9,13 +9,4 @@ SGLANG_BACKEND_DEFINITION = BackendDefinition(
     backend_type=BackendType.SGLANG,
     name='sglang',
     backend_cls=SGLangBackend,
-    capability_names=(
-        'forward_request',
-        'stream_forward',
-        'fetch_models',
-        'check_health',
-        'register_node',
-        'deregister_node',
-        'handle_pd_request',
-    ),
 )

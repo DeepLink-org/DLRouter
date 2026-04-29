@@ -11,6 +11,7 @@ from dlrouter.constants import BackendType
     [
         (BackendType.VLLM, 'vllm'),
         (BackendType.LMDEPLOY, 'lmdeploy'),
+        (BackendType.SGLANG, 'sglang'),
     ],
 )
 def test_builtin_backends_expose_phase_one_capabilities(
@@ -27,8 +28,11 @@ def test_builtin_backends_expose_phase_one_capabilities(
     assert definition.supports('check_health') is True
     assert definition.supports('register_node') is True
     assert definition.supports('deregister_node') is True
+    assert definition.supports('handle_pd_request') is True
 
     assert hasattr(backend, 'forward_request')
     assert hasattr(backend, 'stream_forward')
     assert hasattr(backend, 'fetch_models')
     assert hasattr(backend, 'check_health')
+    assert hasattr(backend, 'handle_pd_request')
+    assert backend.supports_pd_disagg() is True
