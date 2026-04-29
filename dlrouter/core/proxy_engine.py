@@ -19,6 +19,7 @@ from dlrouter.constants import (
     RoutingStrategy,
     ServingStrategy,
 )
+from dlrouter.core.node_lifecycle import post_call, pre_call
 from dlrouter.core.node_manager import NodeManager
 from dlrouter.logger import get_logger
 from dlrouter.models.protocol import (
@@ -115,12 +116,12 @@ class ProxyEngine:
             return self._model_not_found_response(model_name)
 
         logger.info(f'Dispatching to {node_url} (model={model_name})')
-        start = self.manager.pre_call(node_url)
+        start = pre_call(self.manager, node_url)
 
         if stream:
             gen = self._stream_generate(request_data, node_url, endpoint)
             bg = BackgroundTasks()
-            bg.add_task(self.manager.post_call, node_url, start)
+            bg.add_task(post_call, self.manager, node_url, start)
             return StreamingResponse(
                 gen,
                 background=bg,
@@ -128,11 +129,11 @@ class ProxyEngine:
             )
         try:
             text = await self.backend.forward_request(node_url, endpoint, request_data)
-            self.manager.post_call(node_url, start)
+            post_call(self.manager, node_url, start)
             return JSONResponse(json.loads(text))
         except Exception as e:
             logger.error(f'Forward error: {e}')
-            self.manager.post_call(node_url, start)
+            post_call(self.manager, node_url, start)
             return JSONResponse(
                 self._error_json(ErrorCode.BACKEND_ERROR),
                 status_code=502,

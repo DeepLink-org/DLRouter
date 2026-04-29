@@ -7,6 +7,23 @@ from dlrouter.backends.base import BaseBackend, CLIArg
 from dlrouter.constants import BackendType
 
 
+BASE_BACKEND_CAPABILITIES = frozenset(
+    {
+        'check_health',
+        'close',
+        'create',
+        'create_service_discovery',
+        'deregister_node',
+        'fetch_models',
+        'forward_request',
+        'get_cli_args',
+        'parse_config',
+        'register_node',
+        'stream_forward',
+    }
+)
+
+
 @dataclass(frozen=True)
 class BackendDefinition:
     """Static definition for a backend type."""
@@ -38,4 +55,12 @@ class BackendDefinition:
 
     def supports(self, capability_name: str) -> bool:
         """Whether this backend exposes a named capability."""
-        return capability_name in self.capability_names
+        if capability_name in BASE_BACKEND_CAPABILITIES:
+            return callable(getattr(self.backend_cls, capability_name, None))
+
+        if capability_name in self.capability_names:
+            return True
+
+        backend_attr = getattr(self.backend_cls, capability_name, None)
+        base_attr = getattr(BaseBackend, capability_name, None)
+        return callable(backend_attr) and backend_attr is not base_attr

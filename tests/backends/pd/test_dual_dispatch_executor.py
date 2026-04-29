@@ -1,5 +1,6 @@
-"""Tests for the SGLang dual-dispatch PD executor."""
+"""Tests for the shared dual-dispatch PD executor."""
 
+import asyncio
 import json
 import threading
 from unittest.mock import AsyncMock, MagicMock
@@ -8,8 +9,8 @@ import pytest
 from fastapi.responses import StreamingResponse
 
 from dlrouter.backends.base import PDRequestContext
-from dlrouter.backends.sglang.dual_dispatch import SGLangDualDispatchExecutor
-from dlrouter.backends.sglang.transfer import SGLangBootstrapAdapter
+from dlrouter.backends.pd import DualDispatchExecutor
+from dlrouter.backends.sglang.bootstrap import SGLangBootstrapAdapter
 from dlrouter.constants import EngineRole
 from dlrouter.models.node import NodeStatus
 from dlrouter.routing.round_robin import RoundRobinStrategy
@@ -60,15 +61,15 @@ async def _aiter(chunks):
 
 @pytest.mark.asyncio
 async def test_execute_non_stream_dual_dispatches_same_routed_request_and_returns_decode_json():
-    backend = MagicMock()
-    backend.forward_request = AsyncMock(
+    transport = MagicMock()
+    transport.forward_request = AsyncMock(
         side_effect=[
             '{"prefill": true}',
             '{"id": "cmpl-1", "choices": [{"text": "hello"}]}',
         ]
     )
-    executor = SGLangDualDispatchExecutor(
-        backend=backend,
+    executor = DualDispatchExecutor(
+        transport=transport,
         adapter=SGLangBootstrapAdapter(
             {'http://10.0.0.1:8100': 8998},
             room_generator=lambda: 777,
@@ -87,10 +88,10 @@ async def test_execute_non_stream_dual_dispatches_same_routed_request_and_return
         'id': 'cmpl-1',
         'choices': [{'text': 'hello'}],
     }
-    assert backend.forward_request.await_count == 2
+    assert transport.forward_request.await_count == 2
 
-    prefill_call = backend.forward_request.await_args_list[0].args
-    decode_call = backend.forward_request.await_args_list[1].args
+    prefill_call = transport.forward_request.await_args_list[0].args
+    decode_call = transport.forward_request.await_args_list[1].args
 
     assert prefill_call[0] == 'http://10.0.0.1:8100'
     assert decode_call[0] == 'http://10.0.0.2:8200'
@@ -104,9 +105,9 @@ async def test_execute_non_stream_dual_dispatches_same_routed_request_and_return
 
 @pytest.mark.asyncio
 async def test_execute_non_stream_returns_503_when_no_pd_pair():
-    backend = MagicMock()
-    executor = SGLangDualDispatchExecutor(
-        backend=backend,
+    transport = MagicMock()
+    executor = DualDispatchExecutor(
+        transport=transport,
         adapter=SGLangBootstrapAdapter({}),
     )
 
@@ -122,11 +123,11 @@ async def test_execute_non_stream_returns_503_when_no_pd_pair():
 
 @pytest.mark.asyncio
 async def test_execute_stream_returns_decode_stream_and_drains_prefill():
-    backend = MagicMock()
-    backend.forward_request = AsyncMock(return_value='{"prefill": true}')
-    backend.stream_forward = MagicMock(return_value=_aiter([b'data: {"choices": []}\n\n', b'data: [DONE]\n\n']))
-    executor = SGLangDualDispatchExecutor(
-        backend=backend,
+    transport = MagicMock()
+    transport.forward_request = AsyncMock(return_value='{"prefill": true}')
+    transport.stream_forward = MagicMock(return_value=_aiter([b'data: {"choices": []}\n\n', b'data: [DONE]\n\n']))
+    executor = DualDispatchExecutor(
+        transport=transport,
         adapter=SGLangBootstrapAdapter(
             {'http://10.0.0.1:8100': 8998},
             room_generator=lambda: 888,
@@ -147,22 +148,62 @@ async def test_execute_stream_returns_decode_stream_and_drains_prefill():
         chunks.append(chunk)
 
     assert chunks == [b'data: {"choices": []}\n\n', b'data: [DONE]\n\n']
-    backend.forward_request.assert_awaited_once()
-    backend.stream_forward.assert_called_once()
+    transport.forward_request.assert_awaited_once()
+    transport.stream_forward.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_execute_stream_cancels_and_awaits_prefill_when_decode_stream_fails():
+    prefill_started = asyncio.Event()
+    prefill_cancelled = asyncio.Event()
+
+    async def _prefill_waits_until_cancelled(*args):
+        try:
+            prefill_started.set()
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            prefill_cancelled.set()
+            raise
+
+    async def _raising_aiter_after_prefill_starts():
+        await prefill_started.wait()
+        raise RuntimeError('decode stream failed')
+        yield b'unreachable'
+
+    transport = MagicMock()
+    transport.forward_request = AsyncMock(side_effect=_prefill_waits_until_cancelled)
+    transport.stream_forward = MagicMock(return_value=_raising_aiter_after_prefill_starts())
+    executor = DualDispatchExecutor(
+        transport=transport,
+        adapter=SGLangBootstrapAdapter({'http://10.0.0.1:8100': 8998}),
+    )
+
+    response = await executor.execute(
+        request_data={'model': 'qwen3-32b', 'messages': [], 'stream': True},
+        endpoint='/v1/chat/completions',
+        stream=True,
+        context=PDRequestContext(node_manager=_make_node_manager()),
+    )
+
+    with pytest.raises(RuntimeError, match='decode stream failed'):
+        async for _ in response.body_iterator:
+            pass
+
+    assert prefill_cancelled.is_set()
 
 
 @pytest.mark.asyncio
 async def test_execute_non_stream_calls_pre_call_and_post_call_for_both_nodes():
-    backend = MagicMock()
-    backend.forward_request = AsyncMock(
+    transport = MagicMock()
+    transport.forward_request = AsyncMock(
         side_effect=[
             '{"prefill": true}',
             '{"id": "cmpl-1", "choices": [{"text": "hello"}]}',
         ]
     )
     node_manager = _make_node_manager()
-    executor = SGLangDualDispatchExecutor(
-        backend=backend,
+    executor = DualDispatchExecutor(
+        transport=transport,
         adapter=SGLangBootstrapAdapter({'http://10.0.0.1:8100': 8998}),
     )
 

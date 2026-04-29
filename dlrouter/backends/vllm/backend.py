@@ -13,10 +13,9 @@ import aiohttp
 import requests
 
 from dlrouter.backends.base import BaseBackend, CLIArg, PDRequestContext
+from dlrouter.backends.pd import PDExecutor, PDPairSelector, TwoStageTransferExecutor
 from dlrouter.backends.vllm.config import VLLMPDConfig
 from dlrouter.backends.vllm.kv_transfer import VLLMKVTransferAdapter
-from dlrouter.backends.vllm.pair_selection import VLLMPairSelector
-from dlrouter.backends.vllm.two_stage import VLLMTwoStagePDExecutor
 from dlrouter.constants import (
     AIOHTTP_TIMEOUT,
     HEALTH_CHECK_TIMEOUT,
@@ -59,6 +58,7 @@ class VLLMBackend(BaseBackend):
         }
         self._session: Optional[aiohttp.ClientSession] = None
         self._session_lock: Optional[asyncio.Lock] = None
+        self._two_stage_executor: Optional[TwoStageTransferExecutor] = None
 
     @classmethod
     def create(cls, parsed_config: Any = None) -> 'VLLMBackend':
@@ -161,6 +161,10 @@ class VLLMBackend(BaseBackend):
 
     def deregister_node(self, node_url: str) -> None:
         """No-op for vLLM (no PD connection pool)."""
+
+    def supports_pd_disagg(self) -> bool:
+        """vLLM backend supports PD disaggregation."""
+        return True
 
     async def forward_with_request_id(
         self,
@@ -365,19 +369,32 @@ class VLLMBackend(BaseBackend):
         context: PDRequestContext,
     ) -> Any:
         """Handle request in vLLM PD disaggregation mode."""
-        return await self._build_two_stage_executor().execute(
+        return await self._get_pd_executor().execute(
             request_data=request_data,
             endpoint=endpoint,
             stream=stream,
             context=context,
         )
 
-    def _build_two_stage_executor(self) -> VLLMTwoStagePDExecutor:
+    def _get_pd_executor(self) -> PDExecutor:
+        """Return the executor configured by the vLLM PD protocol."""
+        if self.pd_config.pd_protocol == 'two_stage_kv_transfer':
+            return self._get_two_stage_executor()
+
+        raise ValueError(f'Unsupported vLLM PD protocol: {self.pd_config.pd_protocol}')
+
+    def _get_two_stage_executor(self) -> TwoStageTransferExecutor:
+        """Return the cached two-stage executor."""
+        if self._two_stage_executor is None:
+            self._two_stage_executor = self._build_two_stage_executor()
+        return self._two_stage_executor
+
+    def _build_two_stage_executor(self) -> TwoStageTransferExecutor:
         """Build the configured two-stage executor."""
         adapter = VLLMKVTransferAdapter()
-        selector = VLLMPairSelector()
-        return VLLMTwoStagePDExecutor(
-            backend=self,
+        selector = PDPairSelector()
+        return TwoStageTransferExecutor(
+            transport=self,
             adapter=adapter,
             pair_selector=selector,
         )

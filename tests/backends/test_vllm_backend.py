@@ -92,9 +92,9 @@ class TestFactory:
         assert isinstance(backend, VLLMBackend)
         assert definition.supports('check_health') is True
 
-    def test_does_not_support_pd_disagg(self):
+    def test_supports_pd_disagg(self):
         backend = create_backend(BackendType.VLLM)
-        assert backend.supports_pd_disagg() is False
+        assert backend.supports_pd_disagg() is True
 
 
 # ---------------------------------------------------------------------------
@@ -632,8 +632,8 @@ class TestHandlePDRequest:
     @pytest.mark.asyncio
     async def test_handle_pd_request_uses_two_stage_by_default(self):
         backend = VLLMBackend.create(VLLMBackend.parse_config(discovery_mode='static'))
-        backend._build_two_stage_executor = MagicMock()
-        backend._build_two_stage_executor.return_value.execute = AsyncMock(return_value='ok')
+        backend._get_two_stage_executor = MagicMock()
+        backend._get_two_stage_executor.return_value.execute = AsyncMock(return_value='ok')
 
         await backend.handle_pd_request(
             {'model': 'test-model', 'messages': []},
@@ -643,7 +643,54 @@ class TestHandlePDRequest:
             context=PDRequestContext(node_manager=MagicMock()),
         )
 
-        backend._build_two_stage_executor.return_value.execute.assert_awaited_once()
+        backend._get_two_stage_executor.return_value.execute.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_handle_pd_request_dispatches_by_pd_protocol(self):
+        backend = VLLMBackend.create(
+            VLLMPDConfig(
+                discovery_mode=ServiceDiscoveryMode.HEARTBEAT,
+                pd_protocol='two_stage_kv_transfer',
+            )
+        )
+        executor = MagicMock()
+        executor.execute = AsyncMock(return_value='ok')
+        backend._get_two_stage_executor = MagicMock(return_value=executor)
+
+        result = await backend.handle_pd_request(
+            {'model': 'test-model', 'messages': []},
+            'test-model',
+            '/v1/chat/completions',
+            stream=False,
+            context=PDRequestContext(node_manager=MagicMock()),
+        )
+
+        assert result == 'ok'
+        backend._get_two_stage_executor.assert_called_once()
+        executor.execute.assert_awaited_once()
+
+    def test_get_two_stage_executor_caches_instance(self):
+        backend = VLLMBackend.create(VLLMBackend.parse_config())
+        backend._build_two_stage_executor = MagicMock(wraps=backend._build_two_stage_executor)
+
+        first = backend._get_two_stage_executor()
+        second = backend._get_two_stage_executor()
+
+        assert first is second
+        backend._build_two_stage_executor.assert_called_once()
+
+    def test_get_pd_executor_rejects_unsupported_protocol(self):
+        config = VLLMPDConfig.model_construct(
+            discovery_mode=ServiceDiscoveryMode.HEARTBEAT,
+            pd_protocol='unsupported_protocol',
+        )
+        backend = VLLMBackend.create(config)
+
+        with pytest.raises(
+            ValueError,
+            match='Unsupported vLLM PD protocol: unsupported_protocol',
+        ):
+            backend._get_pd_executor()
 
     def test_build_two_stage_executor_uses_vllm_adapter(self):
         backend = VLLMBackend.create(VLLMBackend.parse_config())
@@ -662,8 +709,8 @@ class TestLegacyProtocolRemoval:
     async def test_handle_pd_request_prefill_error(self):
         """Test handle_pd_request delegates executor errors/responses."""
         backend = VLLMBackend.create(VLLMBackend.parse_config(discovery_mode='static'))
-        backend._build_two_stage_executor = MagicMock()
-        backend._build_two_stage_executor.return_value.execute = AsyncMock(
+        backend._get_two_stage_executor = MagicMock()
+        backend._get_two_stage_executor.return_value.execute = AsyncMock(
             return_value=JSONResponse({'error': 'Prefill phase failed'}, status_code=502)
         )
 
@@ -681,8 +728,8 @@ class TestLegacyProtocolRemoval:
     async def test_handle_pd_request_success_non_stream(self):
         """Test handle_pd_request returns non-stream executor response."""
         backend = VLLMBackend.create(VLLMBackend.parse_config(discovery_mode='static'))
-        backend._build_two_stage_executor = MagicMock()
-        backend._build_two_stage_executor.return_value.execute = AsyncMock(
+        backend._get_two_stage_executor = MagicMock()
+        backend._get_two_stage_executor.return_value.execute = AsyncMock(
             return_value=JSONResponse({'id': 'cmpl-123', 'choices': [{'text': 'hello'}]})
         )
 
@@ -695,7 +742,7 @@ class TestLegacyProtocolRemoval:
         )
 
         assert response.status_code == 200
-        backend._build_two_stage_executor.return_value.execute.assert_awaited_once()
+        backend._get_two_stage_executor.return_value.execute.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_handle_pd_request_success_stream(self):
@@ -706,8 +753,8 @@ class TestLegacyProtocolRemoval:
             yield b'data: {"choices":[{"delta":{"content":"hello"}}]}\n\n'
 
         backend = VLLMBackend.create(VLLMBackend.parse_config(discovery_mode='static'))
-        backend._build_two_stage_executor = MagicMock()
-        backend._build_two_stage_executor.return_value.execute = AsyncMock(
+        backend._get_two_stage_executor = MagicMock()
+        backend._get_two_stage_executor.return_value.execute = AsyncMock(
             return_value=StreamingResponse(_stream(), media_type='text/event-stream')
         )
 
@@ -726,8 +773,8 @@ class TestLegacyProtocolRemoval:
     async def test_handle_pd_request_decode_error_non_stream(self):
         """Test handle_pd_request surfaces decode-phase errors from executor."""
         backend = VLLMBackend.create(VLLMBackend.parse_config(discovery_mode='static'))
-        backend._build_two_stage_executor = MagicMock()
-        backend._build_two_stage_executor.return_value.execute = AsyncMock(
+        backend._get_two_stage_executor = MagicMock()
+        backend._get_two_stage_executor.return_value.execute = AsyncMock(
             return_value=JSONResponse({'error': 'Decode phase failed'}, status_code=502)
         )
 

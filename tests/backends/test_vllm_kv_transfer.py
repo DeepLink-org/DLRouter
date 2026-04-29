@@ -3,9 +3,35 @@
 import threading
 from unittest.mock import MagicMock
 
-from dlrouter.backends.vllm.kv_transfer import VLLMKVTransferAdapter
+import dlrouter.backends.vllm.kv_transfer as kv_transfer
+from dlrouter.backends.vllm.kv_transfer import VLLMKVTransferAdapter, build_encoded_request_id
 from dlrouter.constants import EngineRole
 from dlrouter.models.node import NodeStatus
+
+
+def _make_node_manager(prefill_zmq=None, decode_zmq=None):
+    """Build a mock NodeManager with the given ZMQ addresses."""
+    nodes = {
+        'http://10.0.0.1:13700': NodeStatus(
+            role=EngineRole.PREFILL,
+            models=['test-model'],
+            zmq_address=prefill_zmq,
+        ),
+        'http://10.0.0.2:13701': NodeStatus(
+            role=EngineRole.DECODE,
+            models=['test-model'],
+            zmq_address=decode_zmq,
+        ),
+    }
+    nm = MagicMock()
+    nm.nodes = nodes
+    nm._lock = threading.RLock()
+    return nm
+
+
+def test_vllm_kv_transfer_exposes_only_the_current_concrete_adapter():
+    assert not hasattr(kv_transfer, 'KVTransferAdapter')
+    assert not hasattr(VLLMKVTransferAdapter, 'build_abort_payload')
 
 
 def test_vllm_build_prefill_request_forces_prefill_only_mode():
@@ -63,21 +89,10 @@ def test_vllm_inject_decode_request_merges_transfer_context():
 
 def test_vllm_build_request_id_returns_encoded_request_id():
     adapter = VLLMKVTransferAdapter()
-    nodes = {
-        'http://10.0.0.1:13700': NodeStatus(
-            role=EngineRole.PREFILL,
-            models=['test-model'],
-            zmq_address='10.0.0.1:30001',
-        ),
-        'http://10.0.0.2:13701': NodeStatus(
-            role=EngineRole.DECODE,
-            models=['test-model'],
-            zmq_address='10.0.0.2:30002',
-        ),
-    }
-    nm = MagicMock()
-    nm.nodes = nodes
-    nm._lock = threading.RLock()
+    nm = _make_node_manager(
+        prefill_zmq='10.0.0.1:30001',
+        decode_zmq='10.0.0.2:30002',
+    )
 
     request_id = adapter.build_request_id(
         'http://10.0.0.1:13700',
@@ -86,3 +101,47 @@ def test_vllm_build_request_id_returns_encoded_request_id():
     )
 
     assert request_id.startswith('___prefill_addr_10.0.0.1:30001___decode_addr_10.0.0.2:30002_')
+
+
+def test_build_encoded_request_id_lives_with_kv_transfer_adapter() -> None:
+    assert build_encoded_request_id.__module__ == 'dlrouter.backends.vllm.kv_transfer'
+
+
+def test_build_encoded_request_id_prefers_zmq_addresses() -> None:
+    nm = _make_node_manager(
+        prefill_zmq='10.0.0.1:30001',
+        decode_zmq='10.0.0.2:30002',
+    )
+
+    request_id = build_encoded_request_id(
+        'http://10.0.0.1:13700',
+        'http://10.0.0.2:13701',
+        nm,
+    )
+
+    assert request_id.startswith('___prefill_addr_10.0.0.1:30001___decode_addr_10.0.0.2:30002_')
+
+
+def test_build_encoded_request_id_falls_back_to_http_addresses() -> None:
+    nm = _make_node_manager(prefill_zmq=None, decode_zmq=None)
+
+    request_id = build_encoded_request_id(
+        'http://10.0.0.1:13700',
+        'http://10.0.0.2:13701',
+        nm,
+    )
+
+    assert request_id.startswith('___prefill_addr_10.0.0.1:13700___decode_addr_10.0.0.2:13701_')
+
+
+def test_build_encoded_request_id_appends_unique_uuid_suffix() -> None:
+    nm = _make_node_manager(
+        prefill_zmq='10.0.0.1:30001',
+        decode_zmq='10.0.0.2:30002',
+    )
+
+    first = build_encoded_request_id('http://10.0.0.1:13700', 'http://10.0.0.2:13701', nm)
+    second = build_encoded_request_id('http://10.0.0.1:13700', 'http://10.0.0.2:13701', nm)
+
+    assert first != second
+    assert first.rsplit('_', 1)[0] == second.rsplit('_', 1)[0]

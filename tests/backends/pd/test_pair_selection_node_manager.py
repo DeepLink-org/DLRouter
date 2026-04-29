@@ -1,9 +1,9 @@
-"""Tests for vLLM pair selection — NodeManager-based."""
+"""NodeManager-based tests for shared PD pair selection."""
 
 import threading
 from unittest.mock import MagicMock
 
-from dlrouter.backends.vllm.pair_selection import VLLMPairSelector
+from dlrouter.backends.pd import PDPair, PDPairSelector
 from dlrouter.constants import EngineRole
 from dlrouter.models.node import NodeStatus
 from dlrouter.routing.round_robin import RoundRobinStrategy
@@ -52,7 +52,7 @@ def _make_node_manager(
 
 
 def test_select_pair_returns_urls_when_candidates_exist() -> None:
-    selector = VLLMPairSelector()
+    selector = PDPairSelector()
     nm = _make_node_manager(
         prefill_urls=['http://10.0.0.1:13700'],
         decode_urls=['http://10.0.0.2:13701'],
@@ -61,13 +61,12 @@ def test_select_pair_returns_urls_when_candidates_exist() -> None:
     pair = selector.select_pair(node_manager=nm, model_name='qwen3-32b')
 
     assert pair is not None
-    prefill_url, decode_url = pair
-    assert prefill_url == 'http://10.0.0.1:13700'
-    assert decode_url == 'http://10.0.0.2:13701'
+    assert pair.prefill_url == 'http://10.0.0.1:13700'
+    assert pair.decode_url == 'http://10.0.0.2:13701'
 
 
 def test_select_pair_returns_none_when_no_prefill() -> None:
-    selector = VLLMPairSelector()
+    selector = PDPairSelector()
     nm = _make_node_manager(prefill_urls=[], decode_urls=['http://10.0.0.2:13701'])
 
     pair = selector.select_pair(node_manager=nm, model_name='qwen3-32b')
@@ -76,7 +75,7 @@ def test_select_pair_returns_none_when_no_prefill() -> None:
 
 
 def test_select_pair_returns_none_when_no_decode() -> None:
-    selector = VLLMPairSelector()
+    selector = PDPairSelector()
     nm = _make_node_manager(prefill_urls=['http://10.0.0.1:13700'], decode_urls=[])
 
     pair = selector.select_pair(node_manager=nm, model_name='qwen3-32b')
@@ -85,7 +84,7 @@ def test_select_pair_returns_none_when_no_decode() -> None:
 
 
 def test_select_pair_returns_none_when_model_not_served() -> None:
-    selector = VLLMPairSelector()
+    selector = PDPairSelector()
     nm = _make_node_manager(
         prefill_urls=['http://10.0.0.1:13700'],
         decode_urls=['http://10.0.0.2:13701'],
@@ -102,7 +101,7 @@ def test_select_pair_returns_none_when_model_not_served() -> None:
 
 def test_select_pair_uses_node_manager_router() -> None:
     """Verify selection delegates to NodeManager's routing strategy."""
-    selector = VLLMPairSelector()
+    selector = PDPairSelector()
 
     # Mock router that always picks the second prefill node
     mock_router = MagicMock()
@@ -119,13 +118,13 @@ def test_select_pair_uses_node_manager_router() -> None:
     pair = selector.select_pair(node_manager=nm, model_name='qwen3-32b')
 
     assert pair is not None
-    assert pair[0] == 'http://10.0.0.2:13700'
-    assert pair[1] == 'http://10.0.0.1:13701'
+    assert pair.prefill_url == 'http://10.0.0.2:13700'
+    assert pair.decode_url == 'http://10.0.0.1:13701'
     assert mock_router.select_node.call_count == 2
 
 
 def test_select_pair_passes_request_key_to_node_manager() -> None:
-    selector = VLLMPairSelector()
+    selector = PDPairSelector()
     nm = MagicMock()
     nm.get_node_url.side_effect = ['http://prefill:8000', 'http://decode:8000']
 
@@ -135,14 +134,14 @@ def test_select_pair_passes_request_key_to_node_manager() -> None:
         request_key='session-123',
     )
 
-    assert pair == ('http://prefill:8000', 'http://decode:8000')
+    assert pair == PDPair('http://prefill:8000', 'http://decode:8000')
     assert nm.get_node_url.call_args_list[0].kwargs['request_key'] == 'session-123'
     assert nm.get_node_url.call_args_list[1].kwargs['request_key'] == 'session-123'
 
 
 def test_select_pair_rotates_with_round_robin() -> None:
     """Multiple calls with round-robin should work consistently."""
-    selector = VLLMPairSelector()
+    selector = PDPairSelector()
     nm = _make_node_manager(
         prefill_urls=['http://10.0.0.1:13700', 'http://10.0.0.2:13700'],
         decode_urls=['http://10.0.0.1:13701', 'http://10.0.0.2:13701'],
@@ -152,5 +151,5 @@ def test_select_pair_rotates_with_round_robin() -> None:
     for _ in range(4):
         pair = selector.select_pair(node_manager=nm, model_name='qwen3-32b')
         assert pair is not None
-        assert pair[0].startswith('http://')
-        assert pair[1].startswith('http://')
+        assert pair.prefill_url.startswith('http://')
+        assert pair.decode_url.startswith('http://')

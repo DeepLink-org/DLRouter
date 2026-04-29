@@ -1,16 +1,15 @@
-"""Request state for vLLM two-stage PD execution."""
+"""Request-scoped state for PD executors."""
 
 from dataclasses import dataclass, field
 
 
 @dataclass
-class VLLMTwoStageRequestState:
+class TwoStageRequestState:
     """Request-scoped state for a two-stage prefill/decode flow."""
 
     request_id: str
     prefill_url: str
     decode_url: str
-    prefill_kv_released: bool = False
     aborted_request_ids: list[str] = field(default_factory=list)
 
     def mark_aborted(self) -> None:

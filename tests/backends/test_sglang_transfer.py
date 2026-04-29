@@ -1,6 +1,6 @@
 """Tests for SGLang bootstrap request injection."""
 
-from dlrouter.backends.sglang.transfer import SGLangBootstrapAdapter
+from dlrouter.backends.sglang.bootstrap import SGLangBootstrapAdapter
 
 
 def test_build_request_injects_single_bootstrap_fields_without_mutating_input():

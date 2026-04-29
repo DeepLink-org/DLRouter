@@ -24,6 +24,7 @@ from dlrouter.constants import (
     EngineRole,
     ErrorCode,
 )
+from dlrouter.core.node_lifecycle import post_call, pre_call
 from dlrouter.logger import get_logger
 
 
@@ -227,11 +228,11 @@ class LMDeployBackend(BaseBackend):
                 return self._model_not_found_response(model_name)
 
             logger.info(f'Prefill dispatched to {p_url}')
-            start_p = node_manager.pre_call(p_url)
+            start_p = pre_call(node_manager, p_url)
             try:
                 prefill_info = (await self.prefill_request(p_url, endpoint, request_data)) or {}
             finally:
-                node_manager.post_call(p_url, start_p)
+                post_call(node_manager, p_url, start_p)
 
         d_url = node_manager.get_node_url(model_name, EngineRole.DECODE, request_key)
         if not d_url:
@@ -244,7 +245,7 @@ class LMDeployBackend(BaseBackend):
         decode_request_data = copy.deepcopy(request_data)
         decode_request_data['_prefill_url'] = p_url
 
-        start_d = node_manager.pre_call(d_url)
+        start_d = pre_call(node_manager, d_url)
         should_unshelf = bool(not dummy_prefill and prefill_info.get('id'))
         if should_unshelf:
             self.shelf_prefill_session(p_url, d_url, prefill_info['id'])
@@ -259,14 +260,14 @@ class LMDeployBackend(BaseBackend):
             )
         except Exception as e:
             logger.error(f'Decode error: {e}')
-            node_manager.post_call(d_url, start_d)
+            post_call(node_manager, d_url, start_d)
             if should_unshelf:
                 self.unshelf_prefill_session(p_url, d_url, prefill_info['id'])
             return self._backend_error_response()
 
         if stream:
             bg = BackgroundTasks()
-            bg.add_task(node_manager.post_call, d_url, start_d)
+            bg.add_task(post_call, node_manager, d_url, start_d)
             if should_unshelf:
                 bg.add_task(self.unshelf_prefill_session, p_url, d_url, prefill_info['id'])
             return StreamingResponse(
@@ -275,7 +276,7 @@ class LMDeployBackend(BaseBackend):
                 media_type='text/event-stream',
             )
 
-        node_manager.post_call(d_url, start_d)
+        post_call(node_manager, d_url, start_d)
         if should_unshelf:
             self.unshelf_prefill_session(p_url, d_url, prefill_info['id'])
         return JSONResponse(json.loads(result))
