@@ -7,6 +7,8 @@ import random
 from typing import TYPE_CHECKING, Any
 from urllib.parse import urlparse
 
+from dlrouter.backends.utils import normalize_backend_url
+
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -23,7 +25,7 @@ class SGLangBootstrapAdapter:
         bootstrap_ports_by_url: dict[str, int | None],
         room_generator: Callable[[], int] | None = None,
     ) -> None:
-        self.bootstrap_ports_by_url = {_normalize_url(url): port for url, port in bootstrap_ports_by_url.items()}
+        self.bootstrap_ports_by_url = {normalize_backend_url(url): port for url, port in bootstrap_ports_by_url.items()}
         self.room_generator = room_generator or _generate_bootstrap_room
 
     def build_request(
@@ -38,7 +40,7 @@ class SGLangBootstrapAdapter:
         batch_size = _get_request_batch_size(routed_request, endpoint)
         hostname = _bootstrap_host(prefill_url)
         bootstrap_port = self.bootstrap_ports_by_url.get(
-            _normalize_url(prefill_url),
+            normalize_backend_url(prefill_url),
             DEFAULT_BOOTSTRAP_PORT,
         )
 
@@ -110,8 +112,3 @@ def _maybe_wrap_ipv6_address(hostname: str) -> str:
     except ValueError:
         return hostname
     return f'[{hostname}]'
-
-
-def _normalize_url(url: str) -> str:
-    """Normalize static node URL keys for bootstrap-port lookup."""
-    return url.rstrip('/')

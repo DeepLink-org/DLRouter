@@ -91,6 +91,19 @@ class TestParseConfig:
 
         assert config.prefill_bootstrap_ports == [8998, 8999]
 
+    def test_parse_config_drops_empty_csv_items(self):
+        config = SGLangBackend.parse_config(
+            prefill_urls=' http://10.0.0.1:8100, ',
+            decode_urls=' http://10.0.0.2:8200, ',
+            prefill_bootstrap_ports=' 8998, ',
+            models=' Qwen3-4B, , Qwen3-8B ',
+        )
+
+        assert config.prefill_urls == ['http://10.0.0.1:8100']
+        assert config.decode_urls == ['http://10.0.0.2:8200']
+        assert config.prefill_bootstrap_ports == [8998]
+        assert config.models == ['Qwen3-4B', 'Qwen3-8B']
+
     def test_parse_config_rejects_missing_decode_urls(self):
         with pytest.raises(
             ValueError,

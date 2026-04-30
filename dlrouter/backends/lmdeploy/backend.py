@@ -23,6 +23,7 @@ from dlrouter.constants import (
     HEALTH_CHECK_TIMEOUT,
     EngineRole,
     ErrorCode,
+    ServiceDiscoveryMode,
 )
 from dlrouter.core.node_lifecycle import post_call, pre_call
 from dlrouter.logger import get_logger
@@ -182,6 +183,13 @@ class LMDeployBackend(BaseBackend):
     def supports_pd_disagg(self) -> bool:
         """LMDeploy supports PD disaggregation."""
         return True
+
+    def preferred_discovery_mode(
+        self,
+        backend_config: dict[str, Any],
+    ) -> Optional[ServiceDiscoveryMode]:
+        """LMDeploy DistServe relies on external P/D node registration."""
+        return None
 
     @staticmethod
     def _error_json(code: ErrorCode) -> dict[str, Any]:
