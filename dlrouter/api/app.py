@@ -17,7 +17,7 @@ from dlrouter.api.routes import (
 )
 from dlrouter.backends.factory import create_backend
 from dlrouter.config import RouterConfig
-from dlrouter.constants import ServiceDiscoveryMode, ServingStrategy
+from dlrouter.constants import ServingStrategy
 from dlrouter.core.health_check import HealthChecker
 from dlrouter.core.node_manager import NodeManager
 from dlrouter.core.proxy_engine import ProxyEngine
@@ -42,16 +42,6 @@ async def log_validation_error(request: Request, exc: RequestValidationError):
 
 
 logger = get_logger('dlrouter.app')
-
-
-def _resolve_distserve_discovery_mode(backend: Any, config: RouterConfig) -> ServiceDiscoveryMode:
-    """Resolve discovery mode for DistServe startup."""
-    pd_config = getattr(backend, 'pd_config', None)
-    if pd_config is not None and hasattr(pd_config, 'discovery_mode'):
-        return pd_config.discovery_mode
-
-    discovery_mode_str = config.backend_config.get('discovery_mode', 'heartbeat')
-    return ServiceDiscoveryMode(discovery_mode_str)
 
 
 def create_app(
@@ -121,13 +111,13 @@ def create_app(
     # Service discovery (backend-specific, e.g., ZMQ for vLLM PD mode)
     service_discovery: Optional[Any] = None
     if config.serving_strategy == ServingStrategy.DISTSERVE:
-        discovery_mode = _resolve_distserve_discovery_mode(backend, config)
-
-        service_discovery = backend.create_service_discovery(
-            discovery_mode,
-            config.backend_config,
-            node_manager,
-        )
+        discovery_mode = backend.preferred_discovery_mode(config.backend_config)
+        if discovery_mode is not None:
+            service_discovery = backend.create_service_discovery(
+                discovery_mode,
+                config.backend_config,
+                node_manager,
+            )
 
     # Proxy engine
     proxy_engine = ProxyEngine(node_manager)

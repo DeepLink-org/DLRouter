@@ -9,6 +9,7 @@ import requests
 
 from dlrouter.backends.base import BaseBackend, CLIArg, PDRequestContext
 from dlrouter.backends.sglang.config import SGLangPDConfig
+from dlrouter.backends.utils import normalize_backend_url, parse_csv_list
 from dlrouter.constants import (
     AIOHTTP_TIMEOUT,
     HEALTH_CHECK_TIMEOUT,
@@ -140,6 +141,13 @@ class SGLangBackend(BaseBackend):
         """SGLang backend supports PD disaggregation."""
         return True
 
+    def preferred_discovery_mode(
+        self,
+        backend_config: dict[str, Any],
+    ) -> ServiceDiscoveryMode:
+        """Return the SGLang discovery mode inferred from parsed PD config."""
+        return self.parse_config(**backend_config).discovery_mode
+
     @classmethod
     def get_cli_args(cls) -> list[CLIArg]:
         """Return SGLang-specific CLI arguments."""
@@ -173,14 +181,14 @@ class SGLangBackend(BaseBackend):
     @classmethod
     def parse_config(cls, **kwargs: Any) -> SGLangPDConfig:
         """Parse SGLang-specific config from CLI args."""
-        models = _split_csv(kwargs.get('models'))
-        prefill_urls = _split_csv(kwargs.get('prefill_urls'))
-        decode_urls = _split_csv(kwargs.get('decode_urls'))
+        models = parse_csv_list(kwargs.get('models'))
+        prefill_urls = parse_csv_list(kwargs.get('prefill_urls'))
+        decode_urls = parse_csv_list(kwargs.get('decode_urls'))
 
         if bool(prefill_urls) != bool(decode_urls):
             raise ValueError('prefill_urls and decode_urls must be provided together')
 
-        port_values = _split_csv(kwargs.get('prefill_bootstrap_ports'))
+        port_values = parse_csv_list(kwargs.get('prefill_bootstrap_ports'))
         if port_values:
             if len(port_values) != len(prefill_urls):
                 raise ValueError('prefill_bootstrap_ports must match prefill_urls length')
@@ -216,7 +224,7 @@ class SGLangBackend(BaseBackend):
 
         prefill_instances = [
             NodeInfo(
-                http_address=url.replace('http://', '').replace('https://', ''),
+                http_address=normalize_backend_url(url, strip_scheme=True),
                 role=EngineRole.PREFILL,
                 models=config.models,
             )
@@ -224,7 +232,7 @@ class SGLangBackend(BaseBackend):
         ]
         decode_instances = [
             NodeInfo(
-                http_address=url.replace('http://', '').replace('https://', ''),
+                http_address=normalize_backend_url(url, strip_scheme=True),
                 role=EngineRole.DECODE,
                 models=config.models,
             )
@@ -275,10 +283,3 @@ class SGLangBackend(BaseBackend):
             transport=self,
             adapter=SGLangBootstrapAdapter(port_map),
         )
-
-
-def _split_csv(value: Any) -> list[str]:
-    """Split a comma-separated CLI value."""
-    if not value:
-        return []
-    return [item.strip() for item in str(value).split(',') if item.strip()]

@@ -478,6 +478,17 @@ class TestParseConfig:
         config = VLLMBackend.parse_config(models=None)
         assert config.models == []
 
+    def test_parse_config_drops_empty_csv_items(self):
+        config = VLLMBackend.parse_config(
+            models=' model-a, , model-b, ',
+            prefill_urls=' http://10.0.0.1:8200, ',
+            decode_urls=' http://10.0.0.2:8200, ',
+        )
+
+        assert config.models == ['model-a', 'model-b']
+        assert config.prefill_urls == ['http://10.0.0.1:8200']
+        assert config.decode_urls == ['http://10.0.0.2:8200']
+
     def test_parse_config_supports_two_stage_protocol_fields(self):
         config = VLLMBackend.parse_config(
             pd_protocol='two_stage_kv_transfer',

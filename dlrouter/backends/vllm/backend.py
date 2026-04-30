@@ -14,6 +14,7 @@ import requests
 
 from dlrouter.backends.base import BaseBackend, CLIArg, PDRequestContext
 from dlrouter.backends.pd import PDExecutor, PDPairSelector, TwoStageTransferExecutor
+from dlrouter.backends.utils import normalize_backend_url, parse_csv_list
 from dlrouter.backends.vllm.config import VLLMPDConfig
 from dlrouter.backends.vllm.kv_transfer import VLLMKVTransferAdapter
 from dlrouter.constants import (
@@ -166,6 +167,13 @@ class VLLMBackend(BaseBackend):
         """vLLM backend supports PD disaggregation."""
         return True
 
+    def preferred_discovery_mode(
+        self,
+        backend_config: dict[str, Any],
+    ) -> ServiceDiscoveryMode:
+        """Return the vLLM discovery mode inferred from parsed PD config."""
+        return self.parse_config(**backend_config).discovery_mode
+
     async def forward_with_request_id(
         self,
         node_url: str,
@@ -264,17 +272,9 @@ class VLLMBackend(BaseBackend):
     @classmethod
     def parse_config(cls, **kwargs) -> VLLMPDConfig:
         """Parse vLLM-specific config from CLI args."""
-        models = []
-        if kwargs.get('models'):
-            models = [m.strip() for m in kwargs['models'].split(',')]
-
-        prefill_urls = []
-        if kwargs.get('prefill_urls'):
-            prefill_urls = [u.strip() for u in kwargs['prefill_urls'].split(',')]
-
-        decode_urls = []
-        if kwargs.get('decode_urls'):
-            decode_urls = [u.strip() for u in kwargs['decode_urls'].split(',')]
+        models = parse_csv_list(kwargs.get('models'))
+        prefill_urls = parse_csv_list(kwargs.get('prefill_urls'))
+        decode_urls = parse_csv_list(kwargs.get('decode_urls'))
 
         discovery_mode = cls._infer_discovery_mode(
             prefill_urls=prefill_urls,
@@ -328,7 +328,7 @@ class VLLMBackend(BaseBackend):
         if discovery_mode == ServiceDiscoveryMode.STATIC:
             prefill_instances = [
                 NodeInfo(
-                    http_address=url.replace('http://', '').replace('https://', ''),
+                    http_address=normalize_backend_url(url, strip_scheme=True),
                     role=EngineRole.PREFILL,
                     models=config.models,
                 )
@@ -336,7 +336,7 @@ class VLLMBackend(BaseBackend):
             ]
             decode_instances = [
                 NodeInfo(
-                    http_address=url.replace('http://', '').replace('https://', ''),
+                    http_address=normalize_backend_url(url, strip_scheme=True),
                     role=EngineRole.DECODE,
                     models=config.models,
                 )

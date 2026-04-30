@@ -115,6 +115,18 @@ class BaseBackend(ABC):
         """Whether this backend supports PD disagg."""
         return False
 
+    def preferred_discovery_mode(
+        self,
+        backend_config: dict[str, Any],
+    ) -> Optional[ServiceDiscoveryMode]:
+        """Return the backend-preferred DistServe discovery mode.
+
+        Return None when the backend does not need a router-startup
+        service discovery object. This covers backends whose P/D nodes
+        register externally after the router starts.
+        """
+        return None
+
     async def handle_pd_request(
         self,
         request_data: dict[str, Any],
@@ -142,34 +154,6 @@ class BaseBackend(ABC):
             NotImplementedError: If backend doesn't support PD.
         """
         raise NotImplementedError(f'{self.__class__.__name__} does not implement handle_pd_request')
-
-    async def prefill_request(
-        self,
-        node_url: str,
-        endpoint: str,
-        request_data: dict[str, Any],
-    ) -> Optional[dict[str, Any]]:
-        """Send a prefill-only request (PD disagg).
-
-        Returns:
-            Prefill result info dict, or None.
-        """
-        raise NotImplementedError('This backend does not support PD disagg.')
-
-    async def decode_request(
-        self,
-        node_url: str,
-        endpoint: str,
-        request_data: dict[str, Any],
-        prefill_info: dict[str, Any],
-        stream: bool = False,
-    ) -> Any:
-        """Send a decode request with prefill info.
-
-        Returns:
-            Response text or async generator.
-        """
-        raise NotImplementedError('This backend does not support PD disagg.')
 
     @abstractmethod
     def deregister_node(self, node_url: str) -> None:

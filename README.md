@@ -16,6 +16,7 @@ A high-performance router / load balancer for large language model (LLM) inferen
   - **LMDeploy** (including PD disaggregation / DistServe)
   - **vLLM** (hybrid OpenAI-compatible forwarding via explicitly registered nodes, plus DistServe two-stage PD orchestration with static or heartbeat discovery)
   - **SGLang** (DistServe static PD proxy using SGLang bootstrap dual dispatch)
+- **Shared PD Execution Infrastructure** — `backends/pd/` provides Protocol-based contracts (`PDExecutor`, `Transport`, `Adapter`) and reusable executors (`DualDispatchExecutor` for SGLang, `TwoStageTransferExecutor` for vLLM), eliminating duplicated P/D orchestration code across backends.
 - **PD Disaggregation (DistServe)** — First-class support for LMDeploy, vLLM, and SGLang Prefill-Decode separation.
 - **Backend-Owned DistServe Flow** — `ProxyEngine` only dispatches DistServe requests; each backend owns its own PD orchestration (`LMDeploy` via `NodeManager`, `vLLM` via two-stage transfer, `SGLang` via bootstrap dual dispatch).
 - **Dynamic Node Management** — Register, remove, and terminate backend nodes at runtime via REST API.
@@ -43,14 +44,22 @@ DLRouter/
 │   │       └── nodes.py       # Node management endpoints
 │   ├── backends/
 │   │   ├── base.py            # Abstract backend interface
-│   │   ├── lmdeploy/          # LMDeploy backend package (+ PD disagg)
-│   │   ├── sglang/            # SGLang backend package (+ bootstrap PD proxy)
-│   │   ├── vllm/              # vLLM backend package
-│   │   └── factory.py         # Backend factory
+│   │   ├── definition.py      # BackendDefinition metadata & capability detection
+│   │   ├── factory.py         # Backend factory
+│   │   ├── utils.py           # Shared helpers (parse_csv_list, normalize_backend_url)
+│   │   ├── pd/               # Shared PD execution infrastructure
+│   │   │   ├── protocols.py  # Protocol contracts (PDExecutor, Transport, Adapter)
+│   │   │   ├── selection.py  # PDPair + PDPairSelector + no_pd_pair_response
+│   │   │   ├── state.py      # TwoStageRequestState
+│   │   │   └── executors/    # DualDispatchExecutor, TwoStageTransferExecutor
+│   │   ├── lmdeploy/          # LMDeploy backend (+ own PD disagg via RDMA)
+│   │   ├── sglang/            # SGLang backend (+ bootstrap PD proxy)
+│   │   └── vllm/              # vLLM backend (+ two-stage KV transfer PD)
 │   ├── core/
 │   │   ├── node_manager.py    # Node registry & lifecycle
 │   │   ├── proxy_engine.py    # Request dispatch (Hybrid / DistServe)
 │   │   ├── health_check.py    # Background health checker
+│   │   ├── node_lifecycle.py  # Safe pre_call/post_call accounting helpers
 │   │   └── service_discovery/ # Static + heartbeat discovery abstractions for PD
 │   ├── models/
 │   │   ├── node.py            # Node / NodeStatus models
@@ -65,29 +74,30 @@ DLRouter/
 │       └── factory.py         # Strategy factory
 ├── tests/
 │   ├── backends/
+│   │   ├── pd/                         # Shared PD executor & selection tests
 │   │   ├── test_backend_contracts.py   # Backend interface contract tests
 │   │   ├── test_backend_definitions.py # Backend definition tests
 │   │   ├── test_lmdeploy_backend.py    # LMDeploy backend PD tests
 │   │   ├── test_sglang_backend.py      # SGLang backend unit tests
-│   │   ├── test_sglang_dual_dispatch.py # SGLang PD dual-dispatch tests
 │   │   ├── test_sglang_transfer.py     # SGLang bootstrap injection tests
+│   │   ├── test_utils.py              # Backend utility function tests
 │   │   ├── test_vllm_backend.py        # vLLM backend unit tests
-│   │   ├── test_vllm_kv_transfer.py    # KV transfer adapter tests
-│   │   ├── test_vllm_pair_selection.py # PD pair selection tests
-│   │   ├── test_vllm_request_id.py     # Request ID encoding tests
-│   │   └── test_vllm_two_stage.py      # Two-stage PD executor tests
+│   │   └── test_vllm_kv_transfer.py    # KV transfer adapter tests
 │   ├── core/
 │   │   ├── test_health_check.py             # Health checker tests
 │   │   ├── test_proxy_engine.py             # ProxyEngine delegation tests
+│   │   ├── test_node_lifecycle.py           # node_lifecycle helper tests
 │   │   ├── test_service_discovery_factory.py # Discovery factory tests
 │   │   ├── test_static_discovery.py         # Static discovery tests
 │   │   └── test_zmq_discovery.py            # ZMQ heartbeat discovery tests
 │   ├── routing/
-│   │   └── test_routing.py        # Routing strategy unit tests
+│   │   └── test_routing.py                  # Routing strategy unit tests
 │   ├── utils/
-│   │   └── test_request_key.py    # Request key extraction tests
-│   ├── test_app_vllm_discovery.py # App factory discovery inference tests
-│   └── test_cli_backend_loading.py # CLI backend loading tests
+│   │   └── test_request_key.py              # Request key extraction tests
+│   ├── test_app_backend_discovery_mode.py   # Backend discovery mode tests
+│   ├── test_app_vllm_discovery.py           # App factory discovery inference tests
+│   ├── test_app_lmdeploy_distserve_external_registration.py
+│   └── test_cli_backend_loading.py          # CLI backend loading tests
 ├── Makefile                   # Dev commands (format, lint, test, etc.)
 └── pyproject.toml             # Project metadata & tool configuration
 ```

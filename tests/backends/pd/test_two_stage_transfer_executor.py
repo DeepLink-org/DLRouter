@@ -1,6 +1,7 @@
 """Tests for the shared two-stage transfer PD executor."""
 
 import threading
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -61,6 +62,26 @@ async def _aiter(chunks):
         yield chunk
 
 
+class _RecordingKVTransferAdapter(VLLMKVTransferAdapter):
+    """Record the abort ids passed to the prefill payload builder."""
+
+    def __init__(self) -> None:
+        self.prefill_abort_ids: list[str] | None = None
+
+    def build_prefill_request(
+        self,
+        request_data: dict[str, Any],
+        request_id: str,
+        aborted_request_ids: list[str],
+    ) -> dict[str, Any]:
+        self.prefill_abort_ids = list(aborted_request_ids)
+        return super().build_prefill_request(
+            request_data,
+            request_id,
+            aborted_request_ids,
+        )
+
+
 @pytest.mark.asyncio
 async def test_execute_non_stream_success_returns_json_response():
     transport = MagicMock()
@@ -85,6 +106,32 @@ async def test_execute_non_stream_success_returns_json_response():
 
     assert response.status_code == 200
     assert transport.forward_with_request_id.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_execute_starts_prefill_without_prior_abort_ids():
+    transport = MagicMock()
+    transport.forward_with_request_id = AsyncMock(
+        side_effect=[
+            '{"kv_transfer_params": {"remote_host": "10.0.0.9"}}',
+            '{"id": "cmpl-1", "choices": [{"text": "hi"}]}',
+        ]
+    )
+    adapter = _RecordingKVTransferAdapter()
+    node_manager = _make_node_manager()
+    executor = TwoStageTransferExecutor(
+        transport=transport,
+        adapter=adapter,
+    )
+
+    await executor.execute(
+        request_data={'model': 'qwen3-32b', 'messages': []},
+        endpoint='/v1/chat/completions',
+        stream=False,
+        context=PDRequestContext(node_manager=node_manager),
+    )
+
+    assert adapter.prefill_abort_ids == []
 
 
 @pytest.mark.asyncio
