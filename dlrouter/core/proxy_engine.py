@@ -4,6 +4,7 @@ Handles Hybrid (standard proxy) and DistServe (PD disaggregation) flows.
 Backend-specific PD logic is delegated to the backend's handle_pd_request().
 """
 
+import asyncio
 import json
 from typing import Any, Optional, Union
 
@@ -169,6 +170,14 @@ class ProxyEngine:
             return JSONResponse(
                 {'error': ('Current backend does not support PD disaggregation')},
                 status_code=400,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            logger.error(f'DistServe forward error: {e}')
+            return JSONResponse(
+                self._error_json(ErrorCode.BACKEND_ERROR),
+                status_code=502,
             )
 
     # -- Unified dispatch --
