@@ -4,7 +4,8 @@ import threading
 from unittest.mock import MagicMock
 
 from dlrouter.backends.pd import PDPair, PDPairSelector
-from dlrouter.constants import EngineRole
+from dlrouter.constants import EngineRole, RoutingStrategy, ServingStrategy
+from dlrouter.core.node_manager import NodeManager
 from dlrouter.models.node import NodeStatus
 from dlrouter.routing.round_robin import RoundRobinStrategy
 
@@ -46,6 +47,24 @@ def _make_node_manager(
 
     nm.get_node_url.side_effect = get_node_url
     return nm
+
+
+def test_node_manager_add_returns_false_when_backend_registration_fails() -> None:
+    backend = MagicMock()
+    backend.register_node.side_effect = RuntimeError('register failed')
+    manager = NodeManager(
+        backend=backend,
+        routing_strategy=RoutingStrategy.ROUND_ROBIN,
+        serving_strategy=ServingStrategy.HYBRID,
+        cache_status=False,
+    )
+    manager._save_config = MagicMock()
+
+    added = manager.add('http://node:8000')
+
+    assert added is False
+    assert 'http://node:8000' not in manager.nodes
+    manager._save_config.assert_not_called()
 
 
 # -- Basic selection tests --

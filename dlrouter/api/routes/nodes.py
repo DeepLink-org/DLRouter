@@ -43,7 +43,9 @@ async def add_node(node: Node):
     - **status**: Optional initial status info
     """
     try:
-        _node_manager.add(node.url, node.status)
+        added = _node_manager.add(node.url, node.status)
+        if not added:
+            return {'error': ('Failed to add node. Check the URL and try again.')}
         logger.info(f'Added node: {node.url}')
         return {'message': 'Added successfully.'}
     except Exception as e:

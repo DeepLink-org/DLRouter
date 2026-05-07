@@ -1,5 +1,6 @@
 """Tests for the shared two-stage transfer PD executor."""
 
+import asyncio
 import threading
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
@@ -273,6 +274,39 @@ async def test_execute_stream_returns_streaming_response():
     )
 
     assert isinstance(response, StreamingResponse)
+
+
+@pytest.mark.asyncio
+async def test_stream_decode_posts_call_when_stream_is_cancelled():
+    transport = MagicMock()
+
+    async def cancelled_stream(*args, **kwargs):
+        raise asyncio.CancelledError
+        yield b''
+
+    transport.forward_with_request_id = AsyncMock(
+        return_value='{"kv_transfer_params": {"remote_host": "10.0.0.9", "remote_port": 20001}}'
+    )
+    transport.stream_forward_with_request_id = MagicMock(return_value=cancelled_stream())
+    node_manager = _make_node_manager()
+    executor = TwoStageTransferExecutor(
+        transport=transport,
+        adapter=VLLMKVTransferAdapter(),
+    )
+
+    response = await executor.execute(
+        request_data={'model': 'qwen3-32b', 'messages': [], 'stream': True},
+        endpoint='/v1/chat/completions',
+        stream=True,
+        context=PDRequestContext(node_manager=node_manager),
+    )
+
+    with pytest.raises(asyncio.CancelledError):
+        async for _ in response.body_iterator:
+            pass
+
+    assert node_manager.post_call.call_count == 2
+    assert node_manager.post_call.call_args_list[-1].args[0] == 'http://10.0.0.2:13701'
 
 
 @pytest.mark.asyncio

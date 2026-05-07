@@ -1,5 +1,6 @@
 """Tests for ProxyEngine DistServe delegation."""
 
+import asyncio
 import json
 from unittest.mock import AsyncMock, MagicMock
 
@@ -58,3 +59,41 @@ class TestHandleDistServe:
         assert isinstance(response, JSONResponse)
         assert response.status_code == 400
         assert json.loads(response.body) == {'error': 'Current backend does not support PD disaggregation'}
+
+    @pytest.mark.asyncio
+    async def test_returns_502_when_backend_pd_request_raises_runtime_error(self):
+        backend = MagicMock()
+        backend.handle_pd_request = AsyncMock(side_effect=RuntimeError('decode connect failed'))
+        node_manager = MagicMock()
+        node_manager.backend = backend
+
+        engine = ProxyEngine(node_manager)
+
+        response = await engine.handle_distserve(
+            {'messages': []},
+            'model-a',
+            '/v1/chat/completions',
+        )
+
+        assert isinstance(response, JSONResponse)
+        assert response.status_code == 502
+        assert json.loads(response.body) == {
+            'error_code': 10403,
+            'text': 'Backend inference engine returned an error.',
+        }
+
+    @pytest.mark.asyncio
+    async def test_re_raises_cancelled_error_for_distserve_requests(self):
+        backend = MagicMock()
+        backend.handle_pd_request = AsyncMock(side_effect=asyncio.CancelledError())
+        node_manager = MagicMock()
+        node_manager.backend = backend
+
+        engine = ProxyEngine(node_manager)
+
+        with pytest.raises(asyncio.CancelledError):
+            await engine.handle_distserve(
+                {'messages': []},
+                'model-a',
+                '/v1/chat/completions',
+            )

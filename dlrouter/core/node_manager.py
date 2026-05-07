@@ -131,12 +131,15 @@ class NodeManager:
         self,
         node_url: str,
         status: Optional[NodeStatus] = None,
-    ) -> None:
+    ) -> bool:
         """Register a backend node.
 
         Args:
             node_url: URL of the backend node.
             status: Optional initial status.
+
+        Returns:
+            True when the node was registered, False when backend registration failed.
         """
         with self._lock:
             if status is None:
@@ -147,17 +150,18 @@ class NodeManager:
             with self._lock:
                 self.nodes[node_url] = status
             self._save_config()
-            return
+            return True
 
         try:
             status = self.backend.register_node(node_url, status)
         except Exception as e:
             logger.error(f'Failed to add node {node_url}: {e}')
-            return
+            return False
 
         with self._lock:
             self.nodes[node_url] = status
         self._save_config()
+        return True
 
     def remove(self, node_url: str) -> None:
         """Remove a backend node.

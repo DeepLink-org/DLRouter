@@ -17,6 +17,7 @@ if TYPE_CHECKING:
 
     from dlrouter.backends.base import PDRequestContext
     from dlrouter.backends.pd.protocols import TwoStageTransferAdapter, TwoStageTransferTransport
+    from dlrouter.core.node_manager import NodeManager
 
 
 class TwoStageTransferExecutor:
@@ -115,7 +116,7 @@ class TwoStageTransferExecutor:
         state: TwoStageRequestState,
         endpoint: str,
         decode_request: dict[str, Any],
-        node_manager: Any | None = None,
+        node_manager: NodeManager,
     ) -> AsyncIterator[bytes]:
         decode_start = self._pre_call(node_manager, state.decode_url)
         try:
@@ -126,7 +127,7 @@ class TwoStageTransferExecutor:
                 state.request_id,
             ):
                 yield chunk
-        except Exception:
+        except BaseException:
             state.mark_aborted()
             self._post_call(node_manager, state.decode_url, decode_start)
             raise
@@ -134,13 +135,13 @@ class TwoStageTransferExecutor:
         self._post_call(node_manager, state.decode_url, decode_start)
 
     @staticmethod
-    def _pre_call(node_manager: Any | None, node_url: str) -> float | None:
+    def _pre_call(node_manager: NodeManager, node_url: str) -> float | None:
         """Track request start on a node for load-aware routing."""
         return pre_call(node_manager, node_url)
 
     @staticmethod
     def _post_call(
-        node_manager: Any | None,
+        node_manager: NodeManager,
         node_url: str,
         start: float | None,
     ) -> None:
