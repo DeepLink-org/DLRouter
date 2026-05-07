@@ -1,13 +1,12 @@
 """SGLang backend adapter."""
 
-import asyncio
-from collections.abc import AsyncIterator
 from typing import TYPE_CHECKING, Any, Optional
 
 import aiohttp
 import requests
 
 from dlrouter.backends.base import BaseBackend, CLIArg, PDRequestContext
+from dlrouter.backends.http import BackendHTTPTransportMixin, StreamFraming
 from dlrouter.backends.sglang.config import SGLangPDConfig
 from dlrouter.backends.utils import normalize_backend_url, parse_csv_list
 from dlrouter.constants import (
@@ -30,15 +29,18 @@ logger = get_logger('dlrouter.backends.sglang')
 DEFAULT_BOOTSTRAP_PORT = 8998
 
 
-class SGLangBackend(BaseBackend):
+class SGLangBackend(BackendHTTPTransportMixin, BaseBackend):
     """Backend adapter for SGLang inference engine."""
+
+    stream_framing = StreamFraming.PASSTHROUGH
 
     def __init__(self, pd_config: Optional[SGLangPDConfig] = None) -> None:
         self.pd_config = pd_config or SGLangPDConfig()
         self._timeout = aiohttp.ClientTimeout(total=AIOHTTP_TIMEOUT)
         self._health_timeout = aiohttp.ClientTimeout(total=HEALTH_CHECK_TIMEOUT)
+        self._connector_kwargs = None
         self._session: Optional[aiohttp.ClientSession] = None
-        self._session_lock: Optional[asyncio.Lock] = None
+        self._session_lock = None
         self._dual_dispatch_executor: Optional[DualDispatchExecutor] = None
 
     @classmethod
@@ -46,64 +48,6 @@ class SGLangBackend(BaseBackend):
         """Create a SGLang backend instance from parsed configuration."""
         config = parsed_config if isinstance(parsed_config, SGLangPDConfig) else SGLangPDConfig()
         return cls(pd_config=config)
-
-    async def _get_session(self) -> aiohttp.ClientSession:
-        """Get or create a persistent aiohttp session."""
-        if self._session_lock is None:
-            self._session_lock = asyncio.Lock()
-
-        if self._session is None or self._session.closed:
-            async with self._session_lock:
-                if self._session is None or self._session.closed:
-                    self._session = aiohttp.ClientSession(timeout=self._timeout)
-        return self._session
-
-    async def close(self) -> None:
-        """Close the persistent session."""
-        if self._session and not self._session.closed:
-            await self._session.close()
-            self._session = None
-
-    async def forward_request(
-        self,
-        node_url: str,
-        endpoint: str,
-        request_data: dict[str, Any],
-        stream: bool = False,
-    ) -> Any:
-        """Forward request to a SGLang node."""
-        session = await self._get_session()
-        try:
-            async with session.post(
-                node_url + endpoint,
-                json=request_data,
-                timeout=self._timeout,
-            ) as resp:
-                return await resp.text()
-        except Exception as e:
-            logger.error(f'SGLang forward error: {e}')
-            raise
-
-    async def stream_forward(
-        self,
-        node_url: str,
-        endpoint: str,
-        request_data: dict[str, Any],
-    ) -> AsyncIterator[bytes]:
-        """Stream-forward request to a SGLang node."""
-        session = await self._get_session()
-        try:
-            async with session.post(
-                node_url + endpoint,
-                json=request_data,
-                timeout=self._timeout,
-            ) as resp:
-                async for chunk in resp.content:
-                    if chunk:
-                        yield chunk
-        except Exception as e:
-            logger.error(f'SGLang stream error: {e}')
-            raise
 
     def fetch_models(self, node_url: str) -> list[str]:
         """Fetch available models from a SGLang node."""
@@ -118,21 +62,6 @@ class SGLangBackend(BaseBackend):
         except Exception as e:
             logger.error(f'Failed to fetch models from {node_url}: {e}')
             return []
-
-    async def check_health(self, node_url: str) -> bool:
-        """Check SGLang node health."""
-        try:
-            async with (
-                aiohttp.ClientSession() as session,
-                session.get(
-                    f'{node_url}/health',
-                    timeout=self._health_timeout,
-                ) as resp,
-            ):
-                return resp.status == 200
-        except Exception as e:
-            logger.error(f'Failed to check health from {node_url}: {e}')
-            return False
 
     def deregister_node(self, node_url: str) -> None:
         """No-op for SGLang static HTTP nodes."""

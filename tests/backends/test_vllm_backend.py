@@ -246,12 +246,14 @@ class TestCheckHealth:
         session_ctx = _make_session_ctx_mock(status=200)
         with patch('aiohttp.ClientSession', return_value=session_ctx):
             backend = VLLMBackend()
+
             assert await backend.check_health(NODE_URL) is True
 
     async def test_unhealthy_non_200(self):
         session_ctx = _make_session_ctx_mock(status=503)
         with patch('aiohttp.ClientSession', return_value=session_ctx):
             backend = VLLMBackend()
+
             assert await backend.check_health(NODE_URL) is False
 
     async def test_connection_error_returns_false(self):
@@ -260,6 +262,7 @@ class TestCheckHealth:
         )
         with patch('aiohttp.ClientSession', return_value=session_ctx):
             backend = VLLMBackend()
+
             assert await backend.check_health(NODE_URL) is False
 
 

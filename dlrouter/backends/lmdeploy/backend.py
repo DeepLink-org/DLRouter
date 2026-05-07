@@ -4,10 +4,8 @@ Supports both Hybrid and DistServe (PD disaggregation)
 serving strategies.
 """
 
-import asyncio
 import copy
 import json
-from collections.abc import AsyncIterator
 from typing import Any, Optional
 
 import aiohttp
@@ -16,6 +14,7 @@ from fastapi import BackgroundTasks
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from dlrouter.backends.base import BaseBackend, CLIArg, PDRequestContext
+from dlrouter.backends.http import BackendHTTPTransportMixin, StreamFraming
 from dlrouter.backends.lmdeploy.config import LMDeployPDConfig
 from dlrouter.constants import (
     AIOHTTP_TIMEOUT,
@@ -36,8 +35,10 @@ DEFAULT_POOL_CONNECTIONS = 100
 DEFAULT_POOL_MAXSIZE = 100
 
 
-class LMDeployBackend(BaseBackend):
+class LMDeployBackend(BackendHTTPTransportMixin, BaseBackend):
     """Backend adapter for LMDeploy inference engine."""
+
+    stream_framing = StreamFraming.SSE_LINES
 
     def __init__(
         self,
@@ -57,7 +58,7 @@ class LMDeployBackend(BaseBackend):
             'enable_cleanup_closed': True,
         }
         self._session: Optional[aiohttp.ClientSession] = None
-        self._session_lock: Optional[asyncio.Lock] = None
+        self._session_lock = None
         self._pd_pool = None
 
     @classmethod
@@ -81,75 +82,11 @@ class LMDeployBackend(BaseBackend):
                 self._pd_pool = None
         return self._pd_pool
 
-    async def _get_session(self) -> aiohttp.ClientSession:
-        """Get or create a persistent aiohttp session."""
-        if self._session_lock is None:
-            self._session_lock = asyncio.Lock()
-
-        if self._session is None or self._session.closed:
-            async with self._session_lock:
-                if self._session is None or self._session.closed:
-                    connector = aiohttp.TCPConnector(**self._connector_kwargs)
-                    self._session = aiohttp.ClientSession(
-                        connector=connector,
-                        timeout=self._timeout,
-                    )
-        return self._session
-
-    async def close(self) -> None:
-        """Close the persistent session."""
-        if self._session and not self._session.closed:
-            await self._session.close()
-            self._session = None
-
     def deregister_node(self, node_url: str) -> None:
         """Remove node from PD connection pool."""
         pool = self._get_pd_pool()
         if pool is not None:
             pool.dereg_instance(node_url)
-
-    async def forward_request(
-        self,
-        node_url: str,
-        endpoint: str,
-        request_data: dict[str, Any],
-        stream: bool = False,
-    ) -> Any:
-        """Forward request to LMDeploy node."""
-        session = await self._get_session()
-        url = node_url + endpoint
-        try:
-            async with session.post(
-                url,
-                json=request_data,
-                timeout=self._timeout,
-            ) as resp:
-                return await resp.text()
-        except Exception as e:
-            logger.error(f'Forward error: {e}')
-            raise
-
-    async def stream_forward(
-        self,
-        node_url: str,
-        endpoint: str,
-        request_data: dict[str, Any],
-    ) -> AsyncIterator[bytes]:
-        """Stream-forward request to LMDeploy node."""
-        session = await self._get_session()
-        url = node_url + endpoint
-        try:
-            async with session.post(
-                url,
-                json=request_data,
-                timeout=self._timeout,
-            ) as resp:
-                async for line in resp.content:
-                    if line.strip():
-                        yield line + b'\n\n'
-        except Exception as e:
-            logger.error(f'Stream error: {e}')
-            raise
 
     def fetch_models(self, node_url: str) -> list[str]:
         """Fetch available models from LMDeploy node."""
@@ -163,22 +100,6 @@ class LMDeployBackend(BaseBackend):
         except Exception as e:
             logger.error(f'Failed to fetch models from {node_url}: {e}')
             return []
-
-    async def check_health(self, node_url: str) -> bool:
-        """Check LMDeploy node health via async request."""
-        url = f'{node_url}/health'
-        try:
-            async with (
-                aiohttp.ClientSession() as session,
-                session.get(
-                    url,
-                    timeout=self._health_timeout,
-                ) as resp,
-            ):
-                return resp.status == 200
-        except Exception as e:
-            logger.error(f'Failed to check health from {node_url}: {e}')
-            return False
 
     def supports_pd_disagg(self) -> bool:
         """LMDeploy supports PD disaggregation."""
