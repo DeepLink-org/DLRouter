@@ -4,7 +4,6 @@ Supports standard OpenAI-compatible API forwarding
 for vLLM inference engine, including PD disaggregation mode.
 """
 
-import asyncio
 import os
 from collections.abc import AsyncIterator
 from typing import TYPE_CHECKING, Any, Optional
@@ -13,6 +12,7 @@ import aiohttp
 import requests
 
 from dlrouter.backends.base import BaseBackend, CLIArg, PDRequestContext
+from dlrouter.backends.http import BackendHTTPTransportMixin, StreamFraming
 from dlrouter.backends.pd import PDExecutor, PDPairSelector, TwoStageTransferExecutor
 from dlrouter.backends.utils import normalize_backend_url, parse_csv_list
 from dlrouter.backends.vllm.config import VLLMPDConfig
@@ -37,8 +37,10 @@ DEFAULT_POOL_CONNECTIONS = 100
 DEFAULT_POOL_MAXSIZE = 100
 
 
-class VLLMBackend(BaseBackend):
+class VLLMBackend(BackendHTTPTransportMixin, BaseBackend):
     """Backend adapter for vLLM inference engine."""
+
+    stream_framing = StreamFraming.SSE_LINES
 
     def __init__(
         self,
@@ -58,7 +60,7 @@ class VLLMBackend(BaseBackend):
             'enable_cleanup_closed': True,
         }
         self._session: Optional[aiohttp.ClientSession] = None
-        self._session_lock: Optional[asyncio.Lock] = None
+        self._session_lock = None
         self._two_stage_executor: Optional[TwoStageTransferExecutor] = None
 
     @classmethod
@@ -66,70 +68,6 @@ class VLLMBackend(BaseBackend):
         """Create a vLLM backend instance from parsed configuration."""
         config = parsed_config if isinstance(parsed_config, VLLMPDConfig) else VLLMPDConfig()
         return cls(pd_config=config)
-
-    async def _get_session(self) -> aiohttp.ClientSession:
-        """Get or create a persistent aiohttp session."""
-        if self._session_lock is None:
-            self._session_lock = asyncio.Lock()
-
-        if self._session is None or self._session.closed:
-            async with self._session_lock:
-                if self._session is None or self._session.closed:
-                    connector = aiohttp.TCPConnector(**self._connector_kwargs)
-                    self._session = aiohttp.ClientSession(
-                        connector=connector,
-                        timeout=self._timeout,
-                    )
-        return self._session
-
-    async def close(self) -> None:
-        """Close the persistent session."""
-        if self._session and not self._session.closed:
-            await self._session.close()
-            self._session = None
-
-    async def forward_request(
-        self,
-        node_url: str,
-        endpoint: str,
-        request_data: dict[str, Any],
-        stream: bool = False,
-    ) -> Any:
-        """Forward request to vLLM node."""
-        session = await self._get_session()
-        url = node_url + endpoint
-        try:
-            async with session.post(
-                url,
-                json=request_data,
-                timeout=self._timeout,
-            ) as resp:
-                return await resp.text()
-        except Exception as e:
-            logger.error(f'Forward error: {e}')
-            raise
-
-    async def stream_forward(
-        self,
-        node_url: str,
-        endpoint: str,
-        request_data: dict[str, Any],
-    ) -> AsyncIterator[bytes]:
-        """Stream-forward request to vLLM node."""
-        session = await self._get_session()
-        url = node_url + endpoint
-        try:
-            async with session.post(
-                url,
-                json=request_data,
-                timeout=self._timeout,
-            ) as resp:
-                async for line in resp.content:
-                    if line.strip():
-                        yield line + b'\n\n'
-        except Exception as e:
-            logger.error(f'Stream error: {e}')
-            raise
 
     def fetch_models(self, node_url: str) -> list[str]:
         """Fetch available models from vLLM node."""
@@ -143,22 +81,6 @@ class VLLMBackend(BaseBackend):
         except Exception as e:
             logger.error(f'Failed to fetch models from {node_url}: {e}')
             return []
-
-    async def check_health(self, node_url: str) -> bool:
-        """Check vLLM node health via async request."""
-        url = f'{node_url}/health'
-        try:
-            async with (
-                aiohttp.ClientSession() as session,
-                session.get(
-                    url,
-                    timeout=self._health_timeout,
-                ) as resp,
-            ):
-                return resp.status == 200
-        except Exception as e:
-            logger.error(f'Failed to check health from {node_url}: {e}')
-            return False
 
     def deregister_node(self, node_url: str) -> None:
         """No-op for vLLM (no PD connection pool)."""

@@ -186,6 +186,22 @@ class TestForwarding:
         assert result == '{"ok": true}'
         session.post.assert_called_once()
 
+    async def test_stream_forward_preserves_raw_chunks(self):
+        backend = SGLangBackend()
+        session = _make_session_mock(body=b'raw-1\n\nraw-2')
+        backend._get_session = AsyncMock(return_value=session)
+
+        chunks = [
+            chunk
+            async for chunk in backend.stream_forward(
+                'http://10.0.0.1:8100',
+                '/generate',
+                {'stream': True},
+            )
+        ]
+
+        assert chunks == [b'raw-1', b'raw-2']
+
     def test_fetch_models_returns_openai_model_ids(self):
         response = MagicMock()
         response.raise_for_status = MagicMock()

@@ -21,6 +21,33 @@ async def _single_chunk_stream() -> AsyncIterator[bytes]:
     yield b'data: ok\n\n'
 
 
+class _AsyncLines:
+    def __init__(self, body: bytes) -> None:
+        self._lines = body.splitlines()
+
+    def __aiter__(self):
+        return self._gen()
+
+    async def _gen(self):
+        for line in self._lines:
+            yield line
+
+
+def _make_session_mock(body: bytes = b'{"ok": true}'):
+    resp = AsyncMock()
+    resp.text = AsyncMock(return_value=body.decode())
+    resp.content = _AsyncLines(body)
+
+    req_ctx = AsyncMock()
+    req_ctx.__aenter__ = AsyncMock(return_value=resp)
+    req_ctx.__aexit__ = AsyncMock(return_value=False)
+
+    session = MagicMock()
+    session.post = MagicMock(return_value=req_ctx)
+    session.closed = False
+    return session
+
+
 class TestFactory:
     def test_uses_lmdeploy_backend_definition(self):
         backend = create_backend(BackendType.LMDEPLOY)
@@ -29,6 +56,25 @@ class TestFactory:
         assert definition is LMDEPLOY_BACKEND_DEFINITION
         assert isinstance(backend, LMDeployBackend)
         assert definition.supports('register_node') is True
+
+
+class TestTransport:
+    @pytest.mark.asyncio
+    async def test_stream_forward_preserves_sse_line_behavior(self):
+        backend = LMDeployBackend()
+        session = _make_session_mock(body=b'data: one\ndata: two')
+        backend._get_session = AsyncMock(return_value=session)
+
+        chunks = [
+            chunk
+            async for chunk in backend.stream_forward(
+                'http://lmdeploy:23333',
+                '/v1/chat/completions',
+                {'stream': True},
+            )
+        ]
+
+        assert chunks == [b'data: one\n\n', b'data: two\n\n']
 
 
 class TestHandlePDRequest:

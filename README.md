@@ -17,6 +17,7 @@ A high-performance router / load balancer for large language model (LLM) inferen
   - **vLLM** (hybrid OpenAI-compatible forwarding via explicitly registered nodes, plus DistServe two-stage PD orchestration with static or heartbeat discovery)
   - **SGLang** (DistServe static PD proxy using SGLang bootstrap dual dispatch)
 - **Shared PD Execution Infrastructure** — `backends/pd/` provides Protocol-based contracts (`PDExecutor`, `Transport`, `Adapter`) and reusable executors (`DualDispatchExecutor` for SGLang, `TwoStageTransferExecutor` for vLLM), eliminating duplicated P/D orchestration code across backends.
+- **Shared Backend HTTP Transport** — `backends/http.py` centralizes async backend forwarding, streaming, health checks, forwarding-session lifecycle, and backend-specific stream framing.
 - **PD Disaggregation (DistServe)** — First-class support for LMDeploy, vLLM, and SGLang Prefill-Decode separation.
 - **Backend-Owned DistServe Flow** — `ProxyEngine` only dispatches DistServe requests; each backend owns its own PD orchestration (`LMDeploy` via `NodeManager`, `vLLM` via two-stage transfer, `SGLang` via bootstrap dual dispatch).
 - **Dynamic Node Management** — Register, remove, and terminate backend nodes at runtime via REST API.
@@ -46,6 +47,7 @@ DLRouter/
 │   │   ├── base.py            # Abstract backend interface
 │   │   ├── definition.py      # BackendDefinition metadata & capability detection
 │   │   ├── factory.py         # Backend factory
+│   │   ├── http.py            # Shared async HTTP transport mixin
 │   │   ├── utils.py           # Shared helpers (parse_csv_list, normalize_backend_url)
 │   │   ├── pd/               # Shared PD execution infrastructure
 │   │   │   ├── protocols.py  # Protocol contracts (PDExecutor, Transport, Adapter)
@@ -77,6 +79,7 @@ DLRouter/
 │   │   ├── pd/                         # Shared PD executor & selection tests
 │   │   ├── test_backend_contracts.py   # Backend interface contract tests
 │   │   ├── test_backend_definitions.py # Backend definition tests
+│   │   ├── test_http_transport.py      # Shared backend HTTP transport tests
 │   │   ├── test_lmdeploy_backend.py    # LMDeploy backend PD tests
 │   │   ├── test_sglang_backend.py      # SGLang backend unit tests
 │   │   ├── test_sglang_transfer.py     # SGLang bootstrap injection tests
@@ -179,17 +182,19 @@ python -m dlrouter --serving_strategy distserve --backend vllm \
   --zmq_port 30001 \
   --models "qwen3-32b"
 
-# vLLM PD disaggregation mode (static P/D lists)
+# vLLM PD disaggregation mode (static P/D lists, multi-P multi-D supported)
+# P and D count need not match — each is routed independently
 python -m dlrouter --serving_strategy distserve --backend vllm \
-  --prefill_urls "http://10.21.9.10:30000" \
-  --decode_urls "http://10.21.9.15:30000" \
+  --prefill_urls "http://10.21.9.10:30000,http://10.21.9.11:30000" \
+  --decode_urls "http://10.21.9.15:30000,http://10.21.9.16:30000,http://10.21.9.17:30000" \
   --models "qwen3-32b"
 
 # SGLang PD disaggregation mode (static P/D lists + bootstrap dual dispatch)
+# prefill_bootstrap_ports count must match prefill_urls count
 python -m dlrouter --serving_strategy distserve --backend sglang \
-  --prefill_urls "http://10.21.9.10:13700" \
-  --decode_urls "http://10.21.9.15:13701" \
-  --prefill_bootstrap_ports "8998" \
+  --prefill_urls "http://10.21.9.10:13700,http://10.21.9.11:13700" \
+  --decode_urls "http://10.21.9.15:13701,http://10.21.9.16:13701" \
+  --prefill_bootstrap_ports "8998,8999" \
   --models "qwen3-32b"
 
 # Use vLLM as backend in hybrid mode (register nodes via /nodes/add)
@@ -271,12 +276,23 @@ Use `distserve` with SGLang when prefill and decode servers are already launched
 - This is different from vLLM two-stage PD, which uses a prefill request first, extracts KV transfer context, then sends decode with `X-Request-Id` / transfer metadata.
 
 ```bash
+# Single P/D (1 prefill + 1 decode)
 python -m dlrouter \
   --serving_strategy distserve \
   --backend sglang \
   --prefill_urls "http://10.201.6.52:13700" \
   --decode_urls "http://10.201.6.52:13701" \
   --prefill_bootstrap_ports "8998" \
+  --models "Qwen3-32B" \
+  --disable_cache_status
+
+# Multi-P multi-D (2 prefill + 2 decode)
+python -m dlrouter \
+  --serving_strategy distserve \
+  --backend sglang \
+  --prefill_urls "http://10.201.6.52:13700,http://10.201.6.53:13700" \
+  --decode_urls "http://10.201.6.52:13701,http://10.201.6.53:13701" \
+  --prefill_bootstrap_ports "8998,8998" \
   --models "Qwen3-32B" \
   --disable_cache_status
 ```
@@ -397,6 +413,16 @@ Client (OpenAI SDK / curl)
         └──► Backend Node 3
              (all nodes use the same backend type, configured via --backend)
 ```
+
+Backend adapters share the async HTTP transport layer in `dlrouter/backends/http.py`
+for normal forwarding, streaming forwarding, health checks, and backend-specific
+stream framing. Normal forwarding and streaming reuse a persistent `aiohttp`
+session; health checks intentionally use short-lived sessions because the
+background `HealthChecker` runs in its own thread and event loops. Backend-specific
+logic still stays in each backend package: vLLM owns two-stage KV transfer,
+SGLang owns bootstrap dual dispatch, and LMDeploy owns its DistServe orchestration.
+`fetch_models()` intentionally remains synchronous because node registration and
+lazy model discovery call it through the current `BaseBackend` contract.
 
 **DistServe (PD Disaggregation) mode:**
 
