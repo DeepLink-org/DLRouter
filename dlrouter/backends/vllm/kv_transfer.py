@@ -5,6 +5,8 @@ from __future__ import annotations
 import uuid
 from typing import TYPE_CHECKING, Any
 
+from dlrouter.backends.vllm.dp_url import normalize_dp_aware_url
+
 
 if TYPE_CHECKING:
     from dlrouter.core.node_manager import NodeManager
@@ -24,10 +26,11 @@ def build_encoded_request_id(
 
 def _get_zmq_address(node_url: str, node_manager: NodeManager) -> str:
     """Get ZMQ address from NodeManager, fallback to stripping http:// from URL."""
-    status = node_manager.nodes.get(node_url)
+    base_url = normalize_dp_aware_url(node_url)
+    status = node_manager.nodes.get(node_url) or node_manager.nodes.get(base_url)
     if status and status.zmq_address:
         return status.zmq_address
-    return node_url.replace('http://', '').replace('https://', '')
+    return base_url.replace('http://', '').replace('https://', '')
 
 
 class VLLMKVTransferAdapter:

@@ -16,6 +16,7 @@ from dlrouter.backends.http import BackendHTTPTransportMixin, StreamFraming
 from dlrouter.backends.pd import PDExecutor, PDPairSelector, TwoStageTransferExecutor
 from dlrouter.backends.utils import normalize_backend_url, parse_csv_list
 from dlrouter.backends.vllm.config import VLLMPDConfig
+from dlrouter.backends.vllm.dp_url import expand_dp_aware_urls, normalize_dp_aware_url, parse_dp_rank
 from dlrouter.backends.vllm.kv_transfer import VLLMKVTransferAdapter
 from dlrouter.constants import (
     AIOHTTP_TIMEOUT,
@@ -71,6 +72,7 @@ class VLLMBackend(BackendHTTPTransportMixin, BaseBackend):
 
     def fetch_models(self, node_url: str) -> list[str]:
         """Fetch available models from vLLM node."""
+        node_url = normalize_dp_aware_url(node_url)
         try:
             url = f'{node_url}/v1/models'
             headers = {'accept': 'application/json'}
@@ -96,6 +98,10 @@ class VLLMBackend(BackendHTTPTransportMixin, BaseBackend):
         """Return the vLLM discovery mode inferred from parsed PD config."""
         return self.parse_config(**backend_config).discovery_mode
 
+    async def check_health(self, node_url: str) -> bool:
+        """Check vLLM health using the physical URL for DP-aware logical nodes."""
+        return await super().check_health(normalize_dp_aware_url(node_url))
+
     async def forward_with_request_id(
         self,
         node_url: str,
@@ -105,11 +111,14 @@ class VLLMBackend(BackendHTTPTransportMixin, BaseBackend):
     ) -> Any:
         """Forward request to vLLM node with X-Request-Id header."""
         session = await self._get_session()
-        url = node_url + endpoint
+        url = normalize_dp_aware_url(node_url) + endpoint
         headers = {
             'Authorization': f'Bearer {os.environ.get("OPENAI_API_KEY", "")}',
             'X-Request-Id': request_id,
         }
+        dp_rank = parse_dp_rank(node_url)
+        if dp_rank is not None:
+            headers['X-data-parallel-rank'] = str(dp_rank)
         try:
             async with session.post(
                 url,
@@ -131,11 +140,14 @@ class VLLMBackend(BackendHTTPTransportMixin, BaseBackend):
     ) -> AsyncIterator[bytes]:
         """Stream-forward request to vLLM node with X-Request-Id header."""
         session = await self._get_session()
-        url = node_url + endpoint
+        url = normalize_dp_aware_url(node_url) + endpoint
         headers = {
             'Authorization': f'Bearer {os.environ.get("OPENAI_API_KEY", "")}',
             'X-Request-Id': request_id,
         }
+        dp_rank = parse_dp_rank(node_url)
+        if dp_rank is not None:
+            headers['X-data-parallel-rank'] = str(dp_rank)
         try:
             async with session.post(
                 url,
@@ -189,6 +201,12 @@ class VLLMBackend(BackendHTTPTransportMixin, BaseBackend):
                 default=None,
                 help='Comma-separated model names for vLLM PD mode',
             ),
+            CLIArg(
+                name='intra_node_data_parallel_size',
+                type=int,
+                default=1,
+                help='Intra-node data parallel size for vLLM DP-aware PD routing',
+            ),
         ]
 
     @classmethod
@@ -197,6 +215,9 @@ class VLLMBackend(BackendHTTPTransportMixin, BaseBackend):
         models = parse_csv_list(kwargs.get('models'))
         prefill_urls = parse_csv_list(kwargs.get('prefill_urls'))
         decode_urls = parse_csv_list(kwargs.get('decode_urls'))
+        dp_size = kwargs.get('intra_node_data_parallel_size', 1)
+        if dp_size is None:
+            dp_size = 1
 
         discovery_mode = cls._infer_discovery_mode(
             prefill_urls=prefill_urls,
@@ -212,6 +233,7 @@ class VLLMBackend(BackendHTTPTransportMixin, BaseBackend):
             models=models,
             prefill_urls=prefill_urls,
             decode_urls=decode_urls,
+            intra_node_data_parallel_size=dp_size,
         )
 
     @staticmethod
@@ -248,21 +270,29 @@ class VLLMBackend(BackendHTTPTransportMixin, BaseBackend):
         config = self.parse_config(**backend_config)
 
         if discovery_mode == ServiceDiscoveryMode.STATIC:
+            prefill_urls = expand_dp_aware_urls(
+                [normalize_backend_url(url, strip_scheme=True) for url in config.prefill_urls],
+                config.intra_node_data_parallel_size,
+            )
+            decode_urls = expand_dp_aware_urls(
+                [normalize_backend_url(url, strip_scheme=True) for url in config.decode_urls],
+                config.intra_node_data_parallel_size,
+            )
             prefill_instances = [
                 NodeInfo(
-                    http_address=normalize_backend_url(url, strip_scheme=True),
+                    http_address=url,
                     role=EngineRole.PREFILL,
                     models=config.models,
                 )
-                for url in config.prefill_urls
+                for url in prefill_urls
             ]
             decode_instances = [
                 NodeInfo(
-                    http_address=normalize_backend_url(url, strip_scheme=True),
+                    http_address=url,
                     role=EngineRole.DECODE,
                     models=config.models,
                 )
-                for url in config.decode_urls
+                for url in decode_urls
             ]
             return StaticServiceDiscovery(
                 node_manager=node_manager,

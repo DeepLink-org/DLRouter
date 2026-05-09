@@ -141,6 +141,19 @@ async def test_forward_request_posts_json_and_returns_text() -> None:
 
 
 @pytest.mark.asyncio
+async def test_forward_request_normalizes_dp_aware_url_before_post() -> None:
+    backend = ExampleBackend()
+
+    await backend.forward_request(
+        'http://node:8000@3',
+        '/v1/chat/completions',
+        {'model': 'qwen'},
+    )
+
+    assert backend._test_session.posts[0]['url'] == 'http://node:8000/v1/chat/completions'
+
+
+@pytest.mark.asyncio
 async def test_stream_forward_sse_lines_skips_blank_lines_and_appends_separator() -> None:
     backend = ExampleBackend()
     backend._test_session.next_post_response = FakeResponse(
@@ -159,6 +172,24 @@ async def test_stream_forward_sse_lines_skips_blank_lines_and_appends_separator(
     # Preserve current vLLM/LMDeploy behavior: append b'\n\n' without
     # stripping an existing newline from the upstream line.
     assert chunks == [b'data: one\n\n\n', b'data: two\n\n\n']
+
+
+@pytest.mark.asyncio
+async def test_stream_forward_normalizes_dp_aware_url_before_post() -> None:
+    backend = ExampleBackend()
+    backend._test_session.next_post_response = FakeResponse(chunks=[b'data: one\n'])
+
+    chunks = [
+        chunk
+        async for chunk in backend.stream_forward(
+            'http://node:8000@3',
+            '/v1/chat/completions',
+            {'stream': True},
+        )
+    ]
+
+    assert chunks == [b'data: one\n\n\n']
+    assert backend._test_session.posts[0]['url'] == 'http://node:8000/v1/chat/completions'
 
 
 @pytest.mark.asyncio

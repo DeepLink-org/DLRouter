@@ -27,6 +27,46 @@ class TestHealthChecker:
 
         node_manager.remove.assert_called_once_with('http://10.0.0.1:8000')
 
+    def test_checks_dp_aware_rank_group_once_by_base_url(self):
+        node_manager = MagicMock()
+        backend = MagicMock()
+        backend.check_health = AsyncMock(return_value=True)
+        node_manager.backend = backend
+        node_manager.nodes = {
+            'http://10.0.0.1:8000@0': NodeStatus(role=EngineRole.PREFILL),
+            'http://10.0.0.1:8000@1': NodeStatus(role=EngineRole.PREFILL),
+            'http://10.0.0.2:8000@0': NodeStatus(role=EngineRole.DECODE),
+        }
+
+        checker = HealthChecker(node_manager, max_failures=1)
+
+        checker._check()
+
+        checked_urls = [call.args[0] for call in backend.check_health.await_args_list]
+        assert checked_urls == ['http://10.0.0.1:8000', 'http://10.0.0.2:8000']
+
+    def test_removes_entire_dp_aware_rank_group_when_base_url_is_stale(self):
+        node_manager = MagicMock()
+        backend = MagicMock()
+
+        async def check_health(url: str) -> bool:
+            return url != 'http://10.0.0.1:8000'
+
+        backend.check_health = AsyncMock(side_effect=check_health)
+        node_manager.backend = backend
+        node_manager.nodes = {
+            'http://10.0.0.1:8000@0': NodeStatus(role=EngineRole.PREFILL),
+            'http://10.0.0.1:8000@1': NodeStatus(role=EngineRole.PREFILL),
+            'http://10.0.0.2:8000@0': NodeStatus(role=EngineRole.DECODE),
+        }
+
+        checker = HealthChecker(node_manager, max_failures=1)
+
+        checker._check()
+
+        removed_urls = [call.args[0] for call in node_manager.remove.call_args_list]
+        assert removed_urls == ['http://10.0.0.1:8000@0', 'http://10.0.0.1:8000@1']
+
 
 class TestLazyModelDiscovery:
     """Tests for _try_fetch_models — lazy model loading on healthy nodes."""

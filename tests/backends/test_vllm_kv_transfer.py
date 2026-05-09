@@ -134,6 +134,23 @@ def test_build_encoded_request_id_falls_back_to_http_addresses() -> None:
     assert request_id.startswith('___prefill_addr_10.0.0.1:13700___decode_addr_10.0.0.2:13701_')
 
 
+def test_build_encoded_request_id_strips_dp_rank_from_fallback_addresses() -> None:
+    nm = _make_node_manager(prefill_zmq=None, decode_zmq=None)
+    nm.nodes = {
+        'http://10.0.0.1:13700@2': NodeStatus(role=EngineRole.PREFILL, models=['test-model']),
+        'http://10.0.0.2:13701@5': NodeStatus(role=EngineRole.DECODE, models=['test-model']),
+    }
+
+    request_id = build_encoded_request_id(
+        'http://10.0.0.1:13700@2',
+        'http://10.0.0.2:13701@5',
+        nm,
+    )
+
+    assert '@' not in request_id
+    assert request_id.startswith('___prefill_addr_10.0.0.1:13700___decode_addr_10.0.0.2:13701_')
+
+
 def test_build_encoded_request_id_appends_unique_uuid_suffix() -> None:
     nm = _make_node_manager(
         prefill_zmq='10.0.0.1:30001',

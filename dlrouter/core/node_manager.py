@@ -18,6 +18,7 @@ from dlrouter.constants import (
     RoutingStrategy,
     ServingStrategy,
 )
+from dlrouter.core.dp_url import normalize_dp_aware_url
 from dlrouter.logger import get_logger
 from dlrouter.models.node import NodeStatus
 from dlrouter.routing.factory import create_routing_strategy
@@ -190,9 +191,10 @@ class NodeManager:
                 logger.error(f'Node {node_url} not found.')
                 return False
             self.nodes.pop(node_url)
+        target_url = normalize_dp_aware_url(node_url)
         try:
             resp = requests.get(
-                f'{node_url}/terminate',
+                f'{target_url}/terminate',
                 headers={'accept': 'application/json'},
             )
             if resp.status_code != 200:
@@ -209,9 +211,21 @@ class NodeManager:
         with self._lock:
             urls = list(self.nodes.keys())
         ok = True
+        terminated_base_urls: set[str] = set()
+        removed_duplicate = False
         for url in urls:
-            if not self.terminate_node(url):
+            base_url = normalize_dp_aware_url(url)
+            if base_url in terminated_base_urls:
+                with self._lock:
+                    removed_duplicate = self.nodes.pop(url, None) is not None or removed_duplicate
+                continue
+
+            if self.terminate_node(url):
+                terminated_base_urls.add(base_url)
+            else:
                 ok = False
+        if removed_duplicate:
+            self._save_config()
         return ok
 
     # -- Query --
