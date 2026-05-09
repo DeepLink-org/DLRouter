@@ -213,6 +213,22 @@ class TestFetchModels:
 
         assert models == []
 
+    def test_normalizes_dp_aware_url_before_fetching_models(self):
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {'data': [{'id': 'qwen3'}]}
+        mock_resp.raise_for_status = MagicMock()
+
+        with patch(
+            'dlrouter.backends.vllm.backend.requests.get',
+            return_value=mock_resp,
+        ) as get:
+            backend = VLLMBackend()
+            models = backend.fetch_models(f'{NODE_URL}@3')
+
+        assert models == ['qwen3']
+        get.assert_called_once()
+        assert get.call_args.args[0] == f'{NODE_URL}/v1/models'
+
 
 # ---------------------------------------------------------------------------
 # check_health
@@ -264,6 +280,17 @@ class TestCheckHealth:
             backend = VLLMBackend()
 
             assert await backend.check_health(NODE_URL) is False
+
+    async def test_normalizes_dp_aware_url_before_health_check(self):
+        session_ctx = _make_session_ctx_mock(status=200)
+        with patch('aiohttp.ClientSession', return_value=session_ctx):
+            backend = VLLMBackend()
+
+            assert await backend.check_health(f'{NODE_URL}@5') is True
+
+        session = session_ctx.__aenter__.return_value
+        session.get.assert_called_once()
+        assert session.get.call_args.args[0] == f'{NODE_URL}/health'
 
 
 # ---------------------------------------------------------------------------
@@ -344,6 +371,24 @@ class TestForwardWithRequestId:
         assert 'X-Request-Id' in call_args.kwargs['headers']
         assert '___prefill_addr_p' in call_args.kwargs['headers']['X-Request-Id']
 
+    async def test_normalizes_dp_aware_url_and_sets_rank_header(self):
+        body = b'{"choices":[]}'
+        session, _ = _make_session_mock_with_chunks(status=200, body=body)
+        backend = VLLMBackend()
+        backend._get_session = AsyncMock(return_value=session)
+
+        result = await backend.forward_with_request_id(
+            f'{NODE_URL}@3',
+            '/v1/chat/completions',
+            {'model': 'x'},
+            'request-id',
+        )
+
+        assert result == '{"choices":[]}'
+        call_args = session.post.call_args
+        assert call_args.args[0] == f'{NODE_URL}/v1/chat/completions'
+        assert call_args.kwargs['headers']['X-data-parallel-rank'] == '3'
+
     async def test_raises_on_error(self):
         session, _ = _make_session_mock_with_chunks(exception=aiohttp.ClientConnectionError('refused'))
         backend = VLLMBackend()
@@ -415,6 +460,27 @@ class TestStreamForwardWithRequestId:
         assert '___prefill_addr_10.0.0.1:30001' in headers['X-Request-Id']
         assert '___decode_addr_10.0.0.2:30001' in headers['X-Request-Id']
 
+    async def test_normalizes_dp_aware_url_and_sets_rank_header(self):
+        body = b'data: {"id":1}\ndata: [DONE]'
+        session, _ = _make_session_mock_with_chunks(status=200, body=body)
+        backend = VLLMBackend()
+        backend._get_session = AsyncMock(return_value=session)
+
+        chunks = [
+            chunk
+            async for chunk in backend.stream_forward_with_request_id(
+                f'{NODE_URL}@6',
+                '/v1/chat/completions',
+                {},
+                'request-id',
+            )
+        ]
+
+        assert chunks
+        call_args = session.post.call_args
+        assert call_args.args[0] == f'{NODE_URL}/v1/chat/completions'
+        assert call_args.kwargs['headers']['X-data-parallel-rank'] == '6'
+
 
 # ---------------------------------------------------------------------------
 # CLI argument registration
@@ -432,6 +498,7 @@ class TestCLIArgs:
             'prefill_urls',
             'decode_urls',
             'models',
+            'intra_node_data_parallel_size',
         ]
 
     def test_cli_args_have_required_fields(self):
@@ -448,6 +515,13 @@ class TestCLIArgs:
         assert zmq_port_arg is not None
         assert zmq_port_arg.type is int
         assert zmq_port_arg.default == 30001
+
+    def test_intra_node_data_parallel_size_arg_exists(self):
+        args = VLLMBackend.get_cli_args()
+        dp_arg = next((a for a in args if a.name == 'intra_node_data_parallel_size'), None)
+        assert dp_arg is not None
+        assert dp_arg.type is int
+        assert dp_arg.default == 1
 
 
 class TestParseConfig:
@@ -472,6 +546,20 @@ class TestParseConfig:
         assert config.zmq_port == 30001
         assert config.ping_timeout_seconds == 5
         assert config.models == []
+        assert config.intra_node_data_parallel_size == 1
+
+    def test_parse_config_accepts_intra_node_data_parallel_size(self):
+        config = VLLMBackend.parse_config(
+            prefill_urls='http://10.0.0.1:8200',
+            decode_urls='http://10.0.0.2:8200',
+            intra_node_data_parallel_size=8,
+        )
+
+        assert config.intra_node_data_parallel_size == 8
+
+    def test_parse_config_rejects_non_positive_intra_node_data_parallel_size(self):
+        with pytest.raises(ValidationError):
+            VLLMBackend.parse_config(intra_node_data_parallel_size=0)
 
     def test_parse_config_strips_model_whitespace(self):
         config = VLLMBackend.parse_config(models='  model-a , model-b  ')
@@ -586,6 +674,32 @@ class TestCreateServiceDiscovery:
         assert discovery._models == []
         assert discovery._initial_prefill == []
         assert discovery._initial_decode == []
+
+    def test_static_discovery_expands_urls_to_dp_aware_logical_nodes(self):
+        backend = VLLMBackend()
+        mock_node_manager = MagicMock()
+
+        discovery = backend.create_service_discovery(
+            ServiceDiscoveryMode.STATIC,
+            {
+                'prefill_urls': 'http://10.0.0.1:8200',
+                'decode_urls': 'http://10.0.0.2:8300',
+                'models': 'qwen3',
+                'intra_node_data_parallel_size': 3,
+            },
+            mock_node_manager,
+        )
+
+        assert [node.http_address for node in discovery._initial_prefill] == [
+            '10.0.0.1:8200@0',
+            '10.0.0.1:8200@1',
+            '10.0.0.1:8200@2',
+        ]
+        assert [node.http_address for node in discovery._initial_decode] == [
+            '10.0.0.2:8300@0',
+            '10.0.0.2:8300@1',
+            '10.0.0.2:8300@2',
+        ]
 
     def test_creates_heartbeat_discovery_for_two_stage(self):
         backend = VLLMBackend.create(

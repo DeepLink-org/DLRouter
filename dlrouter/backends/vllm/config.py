@@ -18,3 +18,4 @@ class VLLMPDConfig(BaseModel):
     models: list[str] = Field(default_factory=list)
     prefill_urls: list[str] = Field(default_factory=list)
     decode_urls: list[str] = Field(default_factory=list)
+    intra_node_data_parallel_size: int = Field(default=1, ge=1)

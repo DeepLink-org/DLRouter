@@ -10,6 +10,7 @@ from dlrouter.constants import (
     HEALTH_CHECK_MAX_FAILURES,
     HEARTBEAT_EXPIRATION,
 )
+from dlrouter.core.dp_url import normalize_dp_aware_url
 from dlrouter.logger import get_logger
 
 
@@ -139,17 +140,22 @@ class HealthChecker:
         """
         semaphore = asyncio.Semaphore(self._batch_size)
 
-        async def check_one(url: str) -> tuple[str, bool]:
+        grouped_urls: dict[str, list[str]] = {}
+        for node_url in node_urls:
+            base_url = normalize_dp_aware_url(node_url)
+            grouped_urls.setdefault(base_url, []).append(node_url)
+
+        async def check_one(base_url: str, logical_urls: list[str]) -> list[tuple[str, bool]]:
             async with semaphore:
                 try:
-                    healthy = await backend.check_health(url)
-                    return (url, healthy)
+                    healthy = await backend.check_health(base_url)
                 except Exception:
-                    return (url, False)
+                    healthy = False
+                return [(url, healthy) for url in logical_urls]
 
-        tasks = [check_one(url) for url in node_urls]
-        results = await asyncio.gather(*tasks, return_exceptions=False)
-        return results
+        tasks = [check_one(base_url, urls) for base_url, urls in grouped_urls.items()]
+        grouped_results = await asyncio.gather(*tasks, return_exceptions=False)
+        return [result for group in grouped_results for result in group]
 
     def _try_fetch_models(self, node_url: str) -> None:
         """Fetch models for a healthy node that has an empty model list.

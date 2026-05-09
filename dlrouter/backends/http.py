@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Any
 import aiohttp
 
 from dlrouter.constants import AIOHTTP_TIMEOUT, HEALTH_CHECK_TIMEOUT
+from dlrouter.core.dp_url import normalize_dp_aware_url
 from dlrouter.logger import get_logger
 
 
@@ -78,7 +79,7 @@ class BackendHTTPTransportMixin:
     ) -> Any:
         """Forward a non-stream request to a backend node."""
         session = await self._get_session()
-        url = node_url + endpoint
+        url = normalize_dp_aware_url(node_url) + endpoint
         try:
             async with session.post(
                 url,
@@ -98,7 +99,7 @@ class BackendHTTPTransportMixin:
     ) -> AsyncIterator[bytes]:
         """Stream-forward a request to a backend node."""
         session = await self._get_session()
-        url = node_url + endpoint
+        url = normalize_dp_aware_url(node_url) + endpoint
         try:
             async with session.post(
                 url,
@@ -133,6 +134,7 @@ class BackendHTTPTransportMixin:
         this intentionally uses a short-lived session to avoid cross-loop
         ClientSession reuse after normal forwarding has created a session.
         """
+        node_url = normalize_dp_aware_url(node_url)
         try:
             async with (
                 aiohttp.ClientSession() as session,

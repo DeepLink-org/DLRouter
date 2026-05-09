@@ -14,7 +14,7 @@ A high-performance router / load balancer for large language model (LLM) inferen
   - `prefix_cache` — Prefix-aware routing that routes requests with shared prefixes to the same node to maximize KV cache reuse.
 - **Multi-Backend Architecture** — Pluggable backend adapters via the `BaseBackend` interface. Currently supported:
   - **LMDeploy** (including PD disaggregation / DistServe)
-  - **vLLM** (hybrid OpenAI-compatible forwarding via explicitly registered nodes, plus DistServe two-stage PD orchestration with static or heartbeat discovery)
+  - **vLLM** (hybrid OpenAI-compatible forwarding via explicitly registered nodes, plus DistServe two-stage PD orchestration with static or heartbeat discovery, including NIXL DP-aware intra-node data parallel rank routing)
   - **SGLang** (DistServe static PD proxy using SGLang bootstrap dual dispatch)
 - **Shared PD Execution Infrastructure** — `backends/pd/` provides Protocol-based contracts (`PDExecutor`, `Transport`, `Adapter`) and reusable executors (`DualDispatchExecutor` for SGLang, `TwoStageTransferExecutor` for vLLM), eliminating duplicated P/D orchestration code across backends.
 - **Shared Backend HTTP Transport** — `backends/http.py` centralizes async backend forwarding, streaming, health checks, forwarding-session lifecycle, and backend-specific stream framing.
@@ -158,6 +158,7 @@ dlrouter
 | `--prefill_urls` | `None` | Comma-separated prefill URLs (when set together with `--decode_urls`, DLRouter infers static mode) |
 | `--decode_urls` | `None` | Comma-separated decode URLs (when set together with `--prefill_urls`, DLRouter infers static mode) |
 | `--models` | `None` | Comma-separated model names (optional, auto-fetched from nodes) |
+| `--intra_node_data_parallel_size` | `1` | Intra-node data parallel size for vLLM NIXL DP-aware PD routing; when >1 each physical URL is expanded into `url@rank` logical nodes (static mode only) |
 
 *SGLang options:*
 | `--prefill_urls` | `None` | Comma-separated SGLang prefill HTTP URLs; required with `--decode_urls` in DistServe mode |
@@ -188,6 +189,15 @@ python -m dlrouter --serving_strategy distserve --backend vllm \
   --prefill_urls "http://10.21.9.10:30000,http://10.21.9.11:30000" \
   --decode_urls "http://10.21.9.15:30000,http://10.21.9.16:30000,http://10.21.9.17:30000" \
   --models "qwen3-32b"
+
+# vLLM PD disaggregation with intra-node data parallel (NIXL DP-aware)
+# Each physical URL is expanded into 8 @rank logical nodes;
+# requests carry X-data-parallel-rank to select the target rank
+python -m dlrouter --serving_strategy distserve --backend vllm \
+  --prefill_urls "http://prefill-node:8001" \
+  --decode_urls "http://decode-node:8002" \
+  --models "kimi-k2.5" \
+  --intra_node_data_parallel_size 8
 
 # SGLang PD disaggregation mode (static P/D lists + bootstrap dual dispatch)
 # prefill_bootstrap_ports count must match prefill_urls count
@@ -251,6 +261,17 @@ Use `distserve` when prefill and decode are separated.
 - Providing only one of the two URL lists is treated as a configuration error.
 - In vLLM heartbeat mode, DLRouter fetches model information before admitting a node into the routable set.
 - If a restarted node is sending heartbeats before its HTTP API is ready, DLRouter temporarily skips registration and later heartbeats retry automatically.
+
+For vLLM static DistServe with NIXL intra-node data parallel, set
+`--intra_node_data_parallel_size` to the local DP size of each configured
+physical P/D URL. For example, `--intra_node_data_parallel_size 8` expands
+`http://decode:8002` into logical nodes `http://decode:8002@0` through
+`http://decode:8002@7`, so `/nodes/status` shows rank-level routing state.
+DLRouter still sends real HTTP requests to the physical URL
+`http://decode:8002`; it strips the `@rank` suffix before forwarding and
+sets `X-data-parallel-rank` for vLLM. If you change the DP size between
+router restarts, prefer `--disable_cache_status` or clear the persisted node
+cache to avoid stale `url@rank` entries.
 
 Typical heartbeat startup:
 
