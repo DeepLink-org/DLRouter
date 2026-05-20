@@ -7,7 +7,7 @@ import os.path as osp
 import threading
 import time
 from collections import deque
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Callable, Optional
 
 import requests
 
@@ -58,6 +58,11 @@ class NodeManager:
         self.cache_status = cache_status
         self.nodes: dict[str, NodeStatus] = {}
         self._lock = threading.RLock()  # 保护 nodes 的并发访问
+
+        # Listeners notified whenever a node URL is removed. Used e.g. by
+        # heartbeat service discovery to invalidate its registered-address
+        # cache so a restarted instance can be re-registered.
+        self._remove_listeners: list[Callable[[str], None]] = []
 
         # Routing strategy
         self._routing_strategy_enum = routing_strategy
@@ -164,6 +169,21 @@ class NodeManager:
         self._save_config()
         return True
 
+    def add_remove_listener(self, listener: Callable[[str], None]) -> None:
+        """Register a callback invoked after a node URL is removed.
+
+        Args:
+            listener: Callable receiving the removed ``node_url``.
+        """
+        self._remove_listeners.append(listener)
+
+    def _notify_remove(self, node_url: str) -> None:
+        for listener in self._remove_listeners:
+            try:
+                listener(node_url)
+            except Exception as e:
+                logger.error(f'remove listener error for {node_url}: {e}')
+
     def remove(self, node_url: str) -> None:
         """Remove a backend node.
 
@@ -176,6 +196,7 @@ class NodeManager:
             self.nodes.pop(node_url)
         self._save_config()
         self.backend.deregister_node(node_url)
+        self._notify_remove(node_url)
 
     def terminate_node(self, node_url: str) -> bool:
         """Terminate and remove a node.
@@ -204,6 +225,7 @@ class NodeManager:
             logger.error(f'Terminate error {node_url}: {e}')
             return False
         self._save_config()
+        self._notify_remove(node_url)
         return True
 
     def terminate_all(self) -> bool:
@@ -217,7 +239,10 @@ class NodeManager:
             base_url = normalize_dp_aware_url(url)
             if base_url in terminated_base_urls:
                 with self._lock:
-                    removed_duplicate = self.nodes.pop(url, None) is not None or removed_duplicate
+                    popped = self.nodes.pop(url, None)
+                if popped is not None:
+                    removed_duplicate = True
+                    self._notify_remove(url)
                 continue
 
             if self.terminate_node(url):

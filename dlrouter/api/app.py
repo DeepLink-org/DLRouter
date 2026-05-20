@@ -118,6 +118,12 @@ def create_app(
                 config.backend_config,
                 node_manager,
             )
+            # Allow heartbeat-based discovery to drop its registered-address
+            # cache when a node is removed (e.g. by HealthChecker after a
+            # crash), so a restarted instance can be re-registered.
+            unregister = getattr(service_discovery, 'unregister_by_url', None)
+            if callable(unregister):
+                node_manager.add_remove_listener(unregister)
 
     # Proxy engine
     proxy_engine = ProxyEngine(node_manager)
