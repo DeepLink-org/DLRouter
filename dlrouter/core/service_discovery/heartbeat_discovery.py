@@ -127,3 +127,31 @@ class HeartbeatServiceDiscovery(BaseServiceDiscovery):
         self._registered.add(key)
         logger.info(f'🔵 Add Decode [HTTP:{http_address}, ZMQ:{zmq_address}]')
         self._sync_to_node_manager(http_address, EngineRole.DECODE, zmq_address)
+
+    # -- Cache invalidation --
+
+    def unregister_by_url(self, node_url: str) -> None:
+        """Drop a node_url from the registered-address cache.
+
+        Called by NodeManager when a node is removed (e.g. by HealthChecker
+        after an instance crash). Without this, the cached key prevents the
+        restarted instance from being re-added through subsequent heartbeats.
+
+        Args:
+            node_url: The full node URL stored in NodeManager
+                (e.g. ``http://10.0.0.1:8000``).
+        """
+        address = node_url
+        for prefix in ('http://', 'https://'):
+            if address.startswith(prefix):
+                address = address[len(prefix) :]
+                break
+        address = address.rstrip('/')
+
+        for role_prefix in ('PREFILL', 'DECODE'):
+            key = f'{role_prefix}:{address}'
+            if key in self._registered:
+                self._registered.discard(key)
+                logger.info(
+                    f'🟡 Unregister {role_prefix} [HTTP:{address}] from heartbeat cache; will accept re-registration',
+                )
