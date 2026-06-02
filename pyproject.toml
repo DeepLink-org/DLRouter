@@ -22,6 +22,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+nanodeploy = [
+    "dlslime>=0.1.16",
+]
 prod = [
     "gunicorn>=21.0.0",
 ]

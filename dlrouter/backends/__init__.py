@@ -8,6 +8,11 @@ from dlrouter.backends.lmdeploy import (
     LMDeployBackend,
     LMDeployPDConfig,
 )
+from dlrouter.backends.nanodeploy import (
+    NANODEPLOY_BACKEND_DEFINITION,
+    NanoDeployBackend,
+    NanoDeployConfig,
+)
 from dlrouter.backends.sglang import (
     SGLANG_BACKEND_DEFINITION,
     SGLangBackend,
@@ -22,12 +27,15 @@ from dlrouter.backends.vllm import (
 
 __all__ = [
     'LMDEPLOY_BACKEND_DEFINITION',
+    'NANODEPLOY_BACKEND_DEFINITION',
     'SGLANG_BACKEND_DEFINITION',
     'VLLM_BACKEND_DEFINITION',
     'BackendDefinition',
     'BaseBackend',
     'LMDeployBackend',
     'LMDeployPDConfig',
+    'NanoDeployBackend',
+    'NanoDeployConfig',
     'SGLangBackend',
     'SGLangPDConfig',
     'VLLMBackend',

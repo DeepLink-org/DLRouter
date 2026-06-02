@@ -17,7 +17,7 @@ from dlrouter.api.routes import (
 )
 from dlrouter.backends.factory import create_backend
 from dlrouter.config import RouterConfig
-from dlrouter.constants import ServingStrategy
+from dlrouter.constants import ServiceDiscoveryMode, ServingStrategy
 from dlrouter.core.health_check import HealthChecker
 from dlrouter.core.node_manager import NodeManager
 from dlrouter.core.proxy_engine import ProxyEngine
@@ -108,22 +108,24 @@ def create_app(
         cache_status=config.cache_status,
     )
 
-    # Service discovery (backend-specific, e.g., ZMQ for vLLM PD mode)
+    # Service discovery (backend-specific)
     service_discovery: Optional[Any] = None
-    if config.serving_strategy == ServingStrategy.DISTSERVE:
-        discovery_mode = backend.preferred_discovery_mode(config.backend_config)
-        if discovery_mode is not None:
-            service_discovery = backend.create_service_discovery(
-                discovery_mode,
-                config.backend_config,
-                node_manager,
-            )
-            # Allow heartbeat-based discovery to drop its registered-address
-            # cache when a node is removed (e.g. by HealthChecker after a
-            # crash), so a restarted instance can be re-registered.
-            unregister = getattr(service_discovery, 'unregister_by_url', None)
-            if callable(unregister):
-                node_manager.add_remove_listener(unregister)
+    discovery_mode = backend.preferred_discovery_mode(config.backend_config)
+    use_discovery = discovery_mode is not None and (
+        config.serving_strategy == ServingStrategy.DISTSERVE
+        or discovery_mode == ServiceDiscoveryMode.NANOCTRL
+    )
+    if use_discovery:
+        service_discovery = backend.create_service_discovery(
+            discovery_mode,
+            config.backend_config,
+            node_manager,
+        )
+        # Allow discovery to drop its registered-address cache when a node is
+        # removed (e.g. by HealthChecker), so a restarted instance can re-register.
+        unregister = getattr(service_discovery, 'unregister_by_url', None)
+        if callable(unregister):
+            node_manager.add_remove_listener(unregister)
 
     # Proxy engine
     proxy_engine = ProxyEngine(node_manager)

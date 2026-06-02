@@ -22,6 +22,9 @@ from dlrouter.core.service_discovery.base import BaseServiceDiscovery, NodeInfo
 from dlrouter.core.service_discovery.heartbeat_discovery import (
     HeartbeatServiceDiscovery,
 )
+from dlrouter.core.service_discovery.nanoctrl_discovery import (
+    NanoCtrlServiceDiscovery,
+)
 from dlrouter.core.service_discovery.static_discovery import (
     StaticServiceDiscovery,
 )
@@ -34,6 +37,7 @@ from dlrouter.core.service_discovery.zmq_heartbeat import (
 __all__ = [
     'BaseServiceDiscovery',
     'HeartbeatServiceDiscovery',
+    'NanoCtrlServiceDiscovery',
     'NodeInfo',
     'StaticServiceDiscovery',
     'ZMQHeartbeatDiscovery',
