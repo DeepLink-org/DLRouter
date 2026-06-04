@@ -2,13 +2,12 @@
 
 Public-facing documentation for DLRouter users and contributors.
 
-## Heterogeneous deployment（异构混推）
+## Serving modes（部署模式）
 
-不同硬件组合的 PD 部署指南会陆续补充，当前可用：
-
-| Guide | Hardware | Backend |
-|-------|----------|---------|
-| [heterogeneous-ppu-maca-lmdeploy.md](./heterogeneous-ppu-maca-lmdeploy.md) | PPU (Prefill) + MACA (Decode) | LMDeploy |
+| Guide | Mode | Backend | 说明 |
+|-------|------|---------|------|
+| [hybrid-vllm-best-practices.md](./hybrid-vllm-best-practices.md) | **Hybrid** | vLLM | 单入口、多 vLLM 副本、步骤与用户案例 |
+| [heterogeneous-ppu-maca-lmdeploy.md](./heterogeneous-ppu-maca-lmdeploy.md) | **DistServe** | LMDeploy | PPU (Prefill) + MACA (Decode) 异构混推 |
 
 ## See also
 
