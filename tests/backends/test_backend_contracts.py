@@ -35,10 +35,6 @@ def test_builtin_backends_expose_phase_one_capabilities(
     assert hasattr(backend, 'fetch_models')
     assert hasattr(backend, 'check_health')
 
-    if backend_type == BackendType.NANODEPLOY:
-        assert backend.supports_pd_disagg() is False
-        return
-
     assert definition.supports('handle_pd_request') is True
     assert hasattr(backend, 'handle_pd_request')
     assert backend.supports_pd_disagg() is True

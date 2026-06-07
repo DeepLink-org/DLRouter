@@ -5,19 +5,27 @@ Forwards OpenAI-compatible HTTP to NanoDeploy ``serve`` nodes. When
 ``nanodeploy``).
 """
 
+import json
 from typing import TYPE_CHECKING, Any, Optional
 
 import aiohttp
 import requests
+from fastapi import BackgroundTasks
+from fastapi.responses import JSONResponse, StreamingResponse
 
-from dlrouter.backends.base import BaseBackend, CLIArg
+from dlrouter.backends.base import BaseBackend, CLIArg, PDRequestContext
 from dlrouter.backends.http import BackendHTTPTransportMixin, StreamFraming
 from dlrouter.backends.nanodeploy.config import NanoDeployConfig
 from dlrouter.constants import (
     AIOHTTP_TIMEOUT,
+    ERROR_MESSAGES,
     HEALTH_CHECK_TIMEOUT,
+    EngineRole,
+    ErrorCode,
     ServiceDiscoveryMode,
 )
+from dlrouter.core.dp_url import normalize_dp_aware_url
+from dlrouter.core.node_lifecycle import post_call, pre_call
 from dlrouter.logger import get_logger
 
 
@@ -32,6 +40,7 @@ DEFAULT_POOL_CONNECTIONS = 100
 DEFAULT_POOL_MAXSIZE = 100
 
 # DLRouter adds routing metadata; NanoDeploy serve only needs generation fields.
+# ``kv_transfer_params`` carries the PD handoff (do_remote_decode / migration).
 _CHAT_FORWARD_KEYS = frozenset(
     {
         'model',
@@ -43,6 +52,7 @@ _CHAT_FORWARD_KEYS = frozenset(
         'max_completion_tokens',
         'ignore_eos',
         'stop',
+        'kv_transfer_params',
     }
 )
 
@@ -136,8 +146,192 @@ class NanoDeployBackend(BackendHTTPTransportMixin, BaseBackend):
             yield chunk
 
     def supports_pd_disagg(self) -> bool:
-        """NanoDeploy hybrid serve integration does not use router PD yet."""
-        return False
+        """NanoDeploy supports two-stage PD disaggregation over HTTP."""
+        return True
+
+    @staticmethod
+    def _error_json(code: ErrorCode) -> dict[str, Any]:
+        return {'error_code': code.value, 'text': ERROR_MESSAGES[code]}
+
+    def _model_not_found_response(self, model_name: str) -> JSONResponse:
+        logger.warning(f'Model not found: {model_name}')
+        return JSONResponse(
+            self._error_json(ErrorCode.MODEL_NOT_FOUND),
+            status_code=404,
+        )
+
+    def _backend_error_response(self) -> JSONResponse:
+        return JSONResponse(
+            self._error_json(ErrorCode.BACKEND_ERROR),
+            status_code=502,
+        )
+
+    async def handle_pd_request(
+        self,
+        request_data: dict[str, Any],
+        model_name: str,
+        endpoint: str,
+        stream: bool,
+        context: PDRequestContext,
+    ) -> Any:
+        """Two-stage PD: prefill (1 token + KV) -> decode (RDMA-pull + stream).
+
+        Stage 1 asks a prefill node to run a single-token prefill and return an
+        opaque ``kv_transfer_params.migration`` payload (a serialized prefilled
+        sequence pointing at the prefill engine's KV blocks). Stage 2 hands that
+        payload to a decode node, which RDMA-pulls the KV cache and generates the
+        full completion. The prefill KV blocks are released afterwards via
+        ``POST /pd/free``.
+        """
+        node_manager = context.node_manager
+        request_key = context.request_key
+
+        p_url = node_manager.get_node_url(model_name, EngineRole.PREFILL, request_key)
+        if not p_url:
+            return self._model_not_found_response(model_name)
+        d_url = node_manager.get_node_url(model_name, EngineRole.DECODE, request_key)
+        if not d_url:
+            return self._model_not_found_response(model_name)
+
+        logger.info(f'PD prefill={p_url} decode={d_url}')
+
+        # ---- Stage 1: prefill ----
+        start_p = pre_call(node_manager, p_url)
+        try:
+            prefill_info = await self._prefill_request(p_url, endpoint, request_data)
+        finally:
+            post_call(node_manager, p_url, start_p)
+
+        if prefill_info is None:
+            return self._backend_error_response()
+
+        kv = prefill_info.get('kv_transfer_params') or {}
+        migration = kv.get('migration')
+        seq_id = kv.get('seq_id')
+        if not migration:
+            # No KV to migrate: the prefill node fully finished the request
+            # locally (e.g. the first sampled token was EOS, so the scheduler
+            # marked the sequence FINISHED instead of TO_BE_MIGRATED). Return
+            # its completion directly instead of handing off to a decode node.
+            if prefill_info.get('choices'):
+                logger.info('Prefill produced a full completion; skipping decode')
+                if stream:
+                    return StreamingResponse(
+                        self._completion_as_sse(prefill_info),
+                        media_type='text/event-stream',
+                    )
+                return JSONResponse(prefill_info)
+            logger.error('Prefill returned no migration payload')
+            return self._backend_error_response()
+
+        # ---- Stage 2: decode ----
+        decode_data = _sanitize_chat_payload(request_data)
+        decode_data['kv_transfer_params'] = {'migration': migration}
+        decode_data['stream'] = stream
+
+        free_ids = [seq_id] if seq_id is not None else []
+        start_d = pre_call(node_manager, d_url)
+
+        if stream:
+            async def _stream():
+                async for chunk in self.stream_forward(d_url, endpoint, decode_data):
+                    yield chunk
+
+            bg = BackgroundTasks()
+            bg.add_task(post_call, node_manager, d_url, start_d)
+            if free_ids:
+                bg.add_task(self._free_prefill, p_url, free_ids)
+            return StreamingResponse(
+                _stream(),
+                background=bg,
+                media_type='text/event-stream',
+            )
+
+        try:
+            text = await self.forward_request(d_url, endpoint, decode_data)
+        except Exception as e:
+            logger.error(f'Decode error on {d_url}: {e}')
+            return self._backend_error_response()
+        finally:
+            post_call(node_manager, d_url, start_d)
+            if free_ids:
+                await self._free_prefill(p_url, free_ids)
+        return JSONResponse(json.loads(text))
+
+    async def _prefill_request(
+        self,
+        node_url: str,
+        endpoint: str,
+        request_data: dict[str, Any],
+    ) -> Optional[dict[str, Any]]:
+        """Run prefill and return the migration payload.
+
+        We do not clamp ``max_tokens`` to 1: a NanoDeploy ``mode="prefill"``
+        engine already emits exactly one token before handing the sequence off
+        for migration, and the user's ``max_tokens`` must survive into the
+        migrated sequence so the decode engine resumes with the right budget.
+        """
+        data = _sanitize_chat_payload(request_data)
+        data['stream'] = False
+        data['kv_transfer_params'] = {'do_remote_decode': True}
+        try:
+            text = await self.forward_request(node_url, endpoint, data)
+            return json.loads(text)
+        except Exception as e:
+            logger.error(f'Prefill request failed on {node_url}: {e}')
+            return None
+
+    @staticmethod
+    async def _completion_as_sse(completion: dict[str, Any]):
+        """Emit a finished (non-migrated) completion as a one-shot SSE stream.
+
+        Used when the prefill node fully answered the request so there is no
+        decode handoff, but the client asked for a streaming response.
+        """
+        obj = completion.get('object') or ''
+        choice = (completion.get('choices') or [{}])[0]
+        finish_reason = choice.get('finish_reason', 'stop')
+        if obj == 'chat.completion':
+            content = (choice.get('message') or {}).get('content', '')
+            chunk = {
+                'id': completion.get('id'),
+                'object': 'chat.completion.chunk',
+                'created': completion.get('created'),
+                'model': completion.get('model'),
+                'choices': [
+                    {
+                        'index': 0,
+                        'delta': {'role': 'assistant', 'content': content},
+                        'finish_reason': finish_reason,
+                    }
+                ],
+            }
+        else:
+            chunk = {
+                'id': completion.get('id'),
+                'object': 'text_completion',
+                'created': completion.get('created'),
+                'model': completion.get('model'),
+                'choices': [
+                    {
+                        'index': 0,
+                        'text': choice.get('text', ''),
+                        'finish_reason': finish_reason,
+                    }
+                ],
+            }
+        yield f'data: {json.dumps(chunk)}\n\n'.encode()
+        yield b'data: [DONE]\n\n'
+
+    async def _free_prefill(self, node_url: str, seq_ids: list[int]) -> None:
+        """Release prefill-side MIGRATE KV blocks via POST /pd/free."""
+        try:
+            session = await self._get_session()
+            url = normalize_dp_aware_url(node_url) + '/pd/free'
+            async with session.post(url, json={'seq_ids': seq_ids}) as resp:
+                await resp.read()
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f'PD free failed on {node_url} for {seq_ids}: {e}')
 
     def preferred_discovery_mode(
         self,

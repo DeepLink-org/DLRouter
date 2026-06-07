@@ -41,6 +41,22 @@ def _entity_http_url(entity: dict[str, Any]) -> str | None:
     return f'http://{host}:{port}'
 
 
+_ROLE_BY_NAME = {
+    'prefill': EngineRole.PREFILL,
+    'decode': EngineRole.DECODE,
+    'hybrid': EngineRole.HYBRID,
+}
+
+
+def _entity_role(entity: dict[str, Any]) -> EngineRole:
+    """Map the entity ``metadata.role`` to an EngineRole (default HYBRID)."""
+    metadata = entity.get('metadata') or {}
+    if not isinstance(metadata, dict):
+        return EngineRole.HYBRID
+    role = str(metadata.get('role', 'hybrid')).strip().lower()
+    return _ROLE_BY_NAME.get(role, EngineRole.HYBRID)
+
+
 def _entity_models(entity: dict[str, Any]) -> list[str]:
     """Model aliases for routing (served name, path, basename)."""
     metadata = entity.get('metadata') or {}
@@ -119,10 +135,12 @@ class NanoCtrlServiceDiscovery(BaseServiceDiscovery):
             if self._node_manager is None:
                 self._known_urls.add(node_url)
                 continue
-            status = NodeStatus(role=EngineRole.HYBRID, models=models)
+            role = _entity_role(entity)
+            status = NodeStatus(role=role, models=models)
             if self._node_manager.add(node_url, status):
                 logger.info(
-                    f'Discovered NanoDeploy node {node_url} models={models}',
+                    f'Discovered NanoDeploy node {node_url} '
+                    f'role={role.name} models={models}',
                 )
             self._known_urls.add(node_url)
 
