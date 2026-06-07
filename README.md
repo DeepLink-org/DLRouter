@@ -36,7 +36,7 @@ application code.
 | LMDeploy | Yes | Yes | External node registration | Uses LMDeploy PD connection pool and RDMA migration when available. |
 | vLLM | Yes | Yes | Static, heartbeat | Supports two-stage KV transfer and static NIXL DP-aware rank routing. |
 | SGLang | Yes | Yes | Static | Uses bootstrap dual dispatch with aligned prefill bootstrap ports. |
-| NanoDeploy | Yes | Comming Soon | dlslime-ctrl (`nanoctrl`) | Hybrid `nanodeploy serve` nodes; auto-discovery when `--ctrl_address` is set. |
+| NanoDeploy | Yes | Yes | dlslime-ctrl (`nanoctrl`) | Hybrid `nanodeploy serve` nodes; auto-discovery when `--ctrl_address` is set. |
 
 DLRouter is configured with one backend type per router process through
 `--backend`. Run multiple router processes if you need separate backend types at
