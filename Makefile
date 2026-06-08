@@ -1,4 +1,4 @@
-.PHONY: help format lint check fix type-check test clean pre-commit-install pre-commit-run
+.PHONY: help format lint check fix type-check test ci clean pre-commit-install pre-commit-run
 
 help: ## Show this help message
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-20s\033[0m %s\n", $$1, $$2}'
@@ -48,5 +48,7 @@ clean: ## Remove build artifacts and caches
 	find . -type f -name "*.pyc" -delete 2>/dev/null || true
 
 # ==================== All-in-one ====================
+
+ci: check type-check test ## CI pipeline (check only, no file modification)
 
 all: fix format type-check test ## Fix, format, type-check, and test

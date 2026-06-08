@@ -369,9 +369,15 @@ make type-check
 # Run tests
 make test
 
-# Run all checks
+# Run all checks (local: auto-fix + test)
 make all
+
+# CI-equivalent checks (no auto-fix; same as GitHub Actions)
+make ci
 ```
+
+Before opening a pull request, run `make ci`. GitHub Actions runs the same
+lint, format, type-check, and test checks on pull requests to `main`.
 
 The test suite lives under `tests/` and covers backend contracts, routing
 strategies, service discovery, health checks, and PD executors.

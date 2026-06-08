@@ -19,6 +19,8 @@ dependencies = [
     "shortuuid>=1.0.0",
     "fire>=0.5.0",
     "pyyaml>=6.0",
+    "msgpack>=1.0.0",
+    "pyzmq>=25.0.0",
 ]
 
 [project.optional-dependencies]
