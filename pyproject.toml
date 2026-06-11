@@ -24,6 +24,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+dlengine = [
+    "dlslime>=0.1.16",
+]
 prod = [
     "gunicorn>=21.0.0",
 ]

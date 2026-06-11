@@ -2,6 +2,11 @@
 
 from dlrouter.backends.base import BaseBackend
 from dlrouter.backends.definition import BackendDefinition
+from dlrouter.backends.dlengine import (
+    DLENGINE_BACKEND_DEFINITION,
+    DLEngineBackend,
+    DLEngineConfig,
+)
 from dlrouter.backends.factory import create_backend, get_backend_definition
 from dlrouter.backends.lmdeploy import (
     LMDEPLOY_BACKEND_DEFINITION,
@@ -21,11 +26,14 @@ from dlrouter.backends.vllm import (
 
 
 __all__ = [
+    'DLENGINE_BACKEND_DEFINITION',
     'LMDEPLOY_BACKEND_DEFINITION',
     'SGLANG_BACKEND_DEFINITION',
     'VLLM_BACKEND_DEFINITION',
     'BackendDefinition',
     'BaseBackend',
+    'DLEngineBackend',
+    'DLEngineConfig',
     'LMDeployBackend',
     'LMDeployPDConfig',
     'SGLangBackend',

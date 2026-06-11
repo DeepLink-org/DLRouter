@@ -36,6 +36,7 @@ application code.
 | LMDeploy | Yes | Yes | External node registration | Uses LMDeploy PD connection pool and RDMA migration when available. |
 | vLLM | Yes | Yes | Static, heartbeat | Supports two-stage KV transfer and static NIXL DP-aware rank routing. |
 | SGLang | Yes | Yes | Static | Uses bootstrap dual dispatch with aligned prefill bootstrap ports. |
+| DLEngine | Yes | Yes | dlslime-ctrl (`nanoctrl`) | Hybrid `dlengine serve` nodes; auto-discovery when `--ctrl_address` is set. |
 
 DLRouter is configured with one backend type per router process through
 `--backend`. Run multiple router processes if you need separate backend types at
@@ -89,6 +90,45 @@ curl -X POST http://localhost:8000/nodes/add \
 ```
 
 Send a request:
+
+```bash
+curl -X POST http://localhost:8000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "Qwen3-4B",
+    "messages": [{"role": "user", "content": "Hello!"}],
+    "stream": false
+  }'
+```
+
+### DLEngine with dlslime-ctrl discovery
+
+Start the control plane and a DLEngine OpenAI server (see DLEngine
+`dlengine serve`), then run DLRouter with auto-discovery:
+
+```bash
+dlslime-ctrl server --redis-url redis://127.0.0.1:6379
+
+dlengine serve /path/to/model \
+  --host 0.0.0.0 --port 8100 \
+  --served-model-name Qwen3-4B \
+  --ctrl-address 127.0.0.1:4479
+
+pip install -e ".[dlengine]"   # pulls dlslime for NanoCtrlClient
+
+python -m dlrouter \
+  --backend dlengine \
+  --serving_strategy hybrid \
+  --ctrl_address 127.0.0.1:4479
+```
+
+DLRouter polls dlslime-ctrl for entities with kind `dlengine` and registers
+their HTTP endpoints. Use the same `model` name as `--served-model-name` in
+requests. Manual registration still works via `POST /nodes/add` when
+`--ctrl_address` is omitted.
+
+Send a request (the served model name, model path, and its basename are all
+accepted as the `model` value):
 
 ```bash
 curl -X POST http://localhost:8000/v1/chat/completions \
@@ -226,7 +266,7 @@ be installed in the runtime environment.
 |---|---|---|
 | `--server_name` | `0.0.0.0` | Bind address. |
 | `--server_port` | `8000` | Listen port. |
-| `--backend` | `lmdeploy` | Backend type: `lmdeploy`, `vllm`, or `sglang`. |
+| `--backend` | `lmdeploy` | Backend type: `lmdeploy`, `vllm`, `sglang`, or `dlengine`. |
 | `--routing_strategy` | `min_expected_latency` | Request routing strategy. |
 | `--serving_strategy` | `hybrid` | Serving mode: `hybrid` or `distserve`. |
 | `--api_keys` | `None` | Comma-separated Bearer tokens for API authentication. |

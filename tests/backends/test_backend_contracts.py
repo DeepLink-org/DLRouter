@@ -12,6 +12,7 @@ from dlrouter.constants import BackendType, ServiceDiscoveryMode
         (BackendType.VLLM, 'vllm'),
         (BackendType.LMDEPLOY, 'lmdeploy'),
         (BackendType.SGLANG, 'sglang'),
+        (BackendType.DLENGINE, 'dlengine'),
     ],
 )
 def test_builtin_backends_expose_phase_one_capabilities(
@@ -28,12 +29,13 @@ def test_builtin_backends_expose_phase_one_capabilities(
     assert definition.supports('check_health') is True
     assert definition.supports('register_node') is True
     assert definition.supports('deregister_node') is True
-    assert definition.supports('handle_pd_request') is True
 
     assert hasattr(backend, 'forward_request')
     assert hasattr(backend, 'stream_forward')
     assert hasattr(backend, 'fetch_models')
     assert hasattr(backend, 'check_health')
+
+    assert definition.supports('handle_pd_request') is True
     assert hasattr(backend, 'handle_pd_request')
     assert backend.supports_pd_disagg() is True
 
@@ -52,6 +54,12 @@ def test_builtin_backends_expose_phase_one_capabilities(
         ),
         (BackendType.SGLANG, {}, ServiceDiscoveryMode.STATIC),
         (BackendType.LMDEPLOY, {}, None),
+        (
+            BackendType.DLENGINE,
+            {'ctrl_address': '127.0.0.1:4479'},
+            ServiceDiscoveryMode.NANOCTRL,
+        ),
+        (BackendType.DLENGINE, {}, None),
     ],
 )
 def test_builtin_backends_return_expected_discovery_preference(
