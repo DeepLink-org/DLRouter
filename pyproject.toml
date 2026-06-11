@@ -22,7 +22,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-nanodeploy = [
+dlengine = [
     "dlslime>=0.1.16",
 ]
 prod = [

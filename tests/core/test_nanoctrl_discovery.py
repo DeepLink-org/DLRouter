@@ -1,11 +1,11 @@
-"""Tests for dlslime-ctrl based NanoDeploy discovery."""
+"""Tests for dlslime-ctrl based DLEngine discovery."""
 
 from unittest.mock import MagicMock
 
 import pytest
 
+from dlrouter.backends.dlengine.backend import _sanitize_chat_payload
 from dlrouter.backends.factory import create_backend
-from dlrouter.backends.nanodeploy.backend import _sanitize_chat_payload
 from dlrouter.constants import BackendType, EngineRole, ServiceDiscoveryMode
 from dlrouter.core.node_manager import NodeManager
 from dlrouter.core.service_discovery.nanoctrl_discovery import (
@@ -56,13 +56,13 @@ def test_entity_role_maps_metadata_role():
 
 
 def test_nanoctrl_discovery_assigns_pd_roles():
-    backend = create_backend(BackendType.NANODEPLOY)
+    backend = create_backend(BackendType.DLENGINE)
     node_manager = NodeManager(backend=backend)
 
     discovery = NanoCtrlServiceDiscovery(
         ctrl_address='127.0.0.1:4479',
         node_manager=node_manager,
-        ctrl_kind='nanodeploy',
+        ctrl_kind='dlengine',
         poll_interval=60.0,
     )
 
@@ -84,9 +84,9 @@ def test_nanoctrl_discovery_assigns_pd_roles():
     assert node_manager.nodes['http://127.0.0.1:8200'].role == EngineRole.DECODE
 
 
-def test_nanodeploy_backend_prefers_nanoctrl_when_ctrl_set():
+def test_dlengine_backend_prefers_nanoctrl_when_ctrl_set():
     backend = create_backend(
-        BackendType.NANODEPLOY,
+        BackendType.DLENGINE,
         {'ctrl_address': '127.0.0.1:4479'},
     )
     assert backend.preferred_discovery_mode({'ctrl_address': '127.0.0.1:4479'}) == (
@@ -97,13 +97,13 @@ def test_nanodeploy_backend_prefers_nanoctrl_when_ctrl_set():
 
 
 def test_nanoctrl_discovery_syncs_nodes():
-    backend = create_backend(BackendType.NANODEPLOY)
+    backend = create_backend(BackendType.DLENGINE)
     node_manager = NodeManager(backend=backend)
 
     discovery = NanoCtrlServiceDiscovery(
         ctrl_address='127.0.0.1:4479',
         node_manager=node_manager,
-        ctrl_kind='nanodeploy',
+        ctrl_kind='dlengine',
         poll_interval=60.0,
     )
 

@@ -37,7 +37,7 @@ class BackendType(str, enum.Enum):
     LMDEPLOY = 'lmdeploy'
     VLLM = 'vllm'
     SGLANG = 'sglang'
-    NANODEPLOY = 'nanodeploy'
+    DLENGINE = 'dlengine'
 
 
 class ServingStrategy(str, enum.Enum):
@@ -70,7 +70,7 @@ class ServiceDiscoveryMode(str, enum.Enum):
 
     STATIC = 'static'  # 手动配置节点列表 (绝大多数场景)
     HEARTBEAT = 'heartbeat'  # 心跳注册模式 (仅 vLLM P2P NCCL)
-    NANOCTRL = 'nanoctrl'  # dlslime-ctrl entity registry (NanoDeploy serve)
+    NANOCTRL = 'nanoctrl'  # dlslime-ctrl entity registry (DLEngine serve)
 
 
 class ErrorCode(enum.IntEnum):

@@ -1,7 +1,7 @@
-"""dlslime-ctrl based service discovery for NanoDeploy HTTP servers.
+"""dlslime-ctrl based service discovery for DLEngine HTTP servers.
 
-NanoDeploy ``serve`` registers OpenAI-compatible HTTP endpoints with
-dlslime-ctrl (entity kind ``nanodeploy``). This discovery polls
+DLEngine ``serve`` registers OpenAI-compatible HTTP endpoints with
+dlslime-ctrl (entity kind ``dlengine``). This discovery polls
 ``list_entities`` and syncs them into NodeManager.
 """
 
@@ -23,7 +23,7 @@ if TYPE_CHECKING:
 
 logger = get_logger('dlrouter.service_discovery.nanoctrl')
 
-DEFAULT_CTRL_KIND = 'nanodeploy'
+DEFAULT_CTRL_KIND = 'dlengine'
 
 
 def _entity_http_url(entity: dict[str, Any]) -> str | None:
@@ -85,7 +85,7 @@ def _entity_models(entity: dict[str, Any]) -> list[str]:
 
 
 class NanoCtrlServiceDiscovery(BaseServiceDiscovery):
-    """Poll dlslime-ctrl and reconcile NanoDeploy HTTP nodes."""
+    """Poll dlslime-ctrl and reconcile DLEngine HTTP nodes."""
 
     def __init__(
         self,
@@ -111,7 +111,7 @@ class NanoCtrlServiceDiscovery(BaseServiceDiscovery):
                 from dlslime.ctrl import NanoCtrlClient
             except ImportError as e:
                 raise ImportError(
-                    'dlslime is required for NanoDeploy dlslime-ctrl discovery. '
+                    'dlslime is required for DLEngine dlslime-ctrl discovery. '
                     'Install with: pip install dlslime',
                 ) from e
             self._client = NanoCtrlClient(self._ctrl_address, self._ctrl_scope)
@@ -139,7 +139,7 @@ class NanoCtrlServiceDiscovery(BaseServiceDiscovery):
             status = NodeStatus(role=role, models=models)
             if self._node_manager.add(node_url, status):
                 logger.info(
-                    f'Discovered NanoDeploy node {node_url} '
+                    f'Discovered DLEngine node {node_url} '
                     f'role={role.name} models={models}',
                 )
             self._known_urls.add(node_url)
@@ -149,7 +149,7 @@ class NanoCtrlServiceDiscovery(BaseServiceDiscovery):
             self._known_urls.discard(node_url)
             if self._node_manager is not None:
                 self._node_manager.remove(node_url)
-                logger.info(f'Removed stale NanoDeploy node {node_url}')
+                logger.info(f'Removed stale DLEngine node {node_url}')
 
     def _loop(self) -> None:
         while not self._stop.wait(self._poll_interval):

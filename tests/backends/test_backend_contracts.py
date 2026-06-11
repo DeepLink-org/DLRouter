@@ -12,7 +12,7 @@ from dlrouter.constants import BackendType, ServiceDiscoveryMode
         (BackendType.VLLM, 'vllm'),
         (BackendType.LMDEPLOY, 'lmdeploy'),
         (BackendType.SGLANG, 'sglang'),
-        (BackendType.NANODEPLOY, 'nanodeploy'),
+        (BackendType.DLENGINE, 'dlengine'),
     ],
 )
 def test_builtin_backends_expose_phase_one_capabilities(
@@ -55,11 +55,11 @@ def test_builtin_backends_expose_phase_one_capabilities(
         (BackendType.SGLANG, {}, ServiceDiscoveryMode.STATIC),
         (BackendType.LMDEPLOY, {}, None),
         (
-            BackendType.NANODEPLOY,
+            BackendType.DLENGINE,
             {'ctrl_address': '127.0.0.1:4479'},
             ServiceDiscoveryMode.NANOCTRL,
         ),
-        (BackendType.NANODEPLOY, {}, None),
+        (BackendType.DLENGINE, {}, None),
     ],
 )
 def test_builtin_backends_return_expected_discovery_preference(

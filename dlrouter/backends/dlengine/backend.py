@@ -1,8 +1,8 @@
-"""NanoDeploy backend adapter.
+"""DLEngine backend adapter.
 
-Forwards OpenAI-compatible HTTP to NanoDeploy ``serve`` nodes. When
+Forwards OpenAI-compatible HTTP to DLEngine ``serve`` nodes. When
 ``--ctrl_address`` is set, discovers nodes via dlslime-ctrl (entity kind
-``nanodeploy``).
+``dlengine``).
 """
 
 import json
@@ -15,7 +15,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 
 from dlrouter.backends.base import BaseBackend, CLIArg, PDRequestContext
 from dlrouter.backends.http import BackendHTTPTransportMixin, StreamFraming
-from dlrouter.backends.nanodeploy.config import NanoDeployConfig
+from dlrouter.backends.dlengine.config import DLEngineConfig
 from dlrouter.constants import (
     AIOHTTP_TIMEOUT,
     ERROR_MESSAGES,
@@ -34,12 +34,12 @@ if TYPE_CHECKING:
     from dlrouter.core.service_discovery.base import BaseServiceDiscovery
 
 
-logger = get_logger('dlrouter.backends.nanodeploy')
+logger = get_logger('dlrouter.backends.dlengine')
 
 DEFAULT_POOL_CONNECTIONS = 100
 DEFAULT_POOL_MAXSIZE = 100
 
-# DLRouter adds routing metadata; NanoDeploy serve only needs generation fields.
+# DLRouter adds routing metadata; DLEngine serve only needs generation fields.
 # ``kv_transfer_params`` carries the PD handoff (do_remote_decode / migration).
 _CHAT_FORWARD_KEYS = frozenset(
     {
@@ -58,25 +58,25 @@ _CHAT_FORWARD_KEYS = frozenset(
 
 
 def _sanitize_chat_payload(request_data: dict[str, Any]) -> dict[str, Any]:
-    """Keep a minimal OpenAI payload for NanoDeploy serve."""
+    """Keep a minimal OpenAI payload for DLEngine serve."""
     payload = {k: request_data[k] for k in _CHAT_FORWARD_KEYS if k in request_data}
     if 'model' in payload:
         payload['model'] = str(payload['model'])
     return payload
 
 
-class NanoDeployBackend(BackendHTTPTransportMixin, BaseBackend):
-    """Backend adapter for NanoDeploy OpenAI HTTP servers."""
+class DLEngineBackend(BackendHTTPTransportMixin, BaseBackend):
+    """Backend adapter for DLEngine OpenAI HTTP servers."""
 
     stream_framing = StreamFraming.SSE_LINES
 
     def __init__(
         self,
-        config: Optional[NanoDeployConfig] = None,
+        config: Optional[DLEngineConfig] = None,
         pool_connections: int = DEFAULT_POOL_CONNECTIONS,
         pool_maxsize: int = DEFAULT_POOL_MAXSIZE,
     ) -> None:
-        self.config = config or NanoDeployConfig()
+        self.config = config or DLEngineConfig()
         self._timeout = aiohttp.ClientTimeout(total=AIOHTTP_TIMEOUT)
         self._health_timeout = aiohttp.ClientTimeout(total=HEALTH_CHECK_TIMEOUT)
         self._connector_kwargs = {
@@ -89,17 +89,17 @@ class NanoDeployBackend(BackendHTTPTransportMixin, BaseBackend):
         self._session_lock = None
 
     @classmethod
-    def create(cls, parsed_config: Any = None) -> 'NanoDeployBackend':
-        """Create a NanoDeploy backend from parsed configuration."""
+    def create(cls, parsed_config: Any = None) -> 'DLEngineBackend':
+        """Create a DLEngine backend from parsed configuration."""
         config = (
             parsed_config
-            if isinstance(parsed_config, NanoDeployConfig)
-            else NanoDeployConfig()
+            if isinstance(parsed_config, DLEngineConfig)
+            else DLEngineConfig()
         )
         return cls(config=config)
 
     def fetch_models(self, node_url: str) -> list[str]:
-        """Fetch available models from a NanoDeploy node."""
+        """Fetch available models from a DLEngine node."""
         try:
             resp = requests.get(
                 f'{node_url}/v1/models',
@@ -114,7 +114,7 @@ class NanoDeployBackend(BackendHTTPTransportMixin, BaseBackend):
             return []
 
     def deregister_node(self, node_url: str) -> None:
-        """No-op for NanoDeploy hybrid HTTP nodes."""
+        """No-op for DLEngine hybrid HTTP nodes."""
 
     def _prepare_payload(self, endpoint: str, request_data: dict[str, Any]) -> dict[str, Any]:
         if endpoint in ('/v1/chat/completions', '/v1/completions'):
@@ -146,7 +146,7 @@ class NanoDeployBackend(BackendHTTPTransportMixin, BaseBackend):
             yield chunk
 
     def supports_pd_disagg(self) -> bool:
-        """NanoDeploy supports two-stage PD disaggregation over HTTP."""
+        """DLEngine supports two-stage PD disaggregation over HTTP."""
         return True
 
     @staticmethod
@@ -266,7 +266,7 @@ class NanoDeployBackend(BackendHTTPTransportMixin, BaseBackend):
     ) -> Optional[dict[str, Any]]:
         """Run prefill and return the migration payload.
 
-        We do not clamp ``max_tokens`` to 1: a NanoDeploy ``mode="prefill"``
+        We do not clamp ``max_tokens`` to 1: a DLEngine ``mode="prefill"``
         engine already emits exactly one token before handing the sequence off
         for migration, and the user's ``max_tokens`` must survive into the
         migrated sequence so the decode engine resumes with the right budget.
@@ -345,13 +345,13 @@ class NanoDeployBackend(BackendHTTPTransportMixin, BaseBackend):
 
     @classmethod
     def get_cli_args(cls) -> list[CLIArg]:
-        """Return NanoDeploy-specific CLI arguments."""
+        """Return DLEngine-specific CLI arguments."""
         return [
             CLIArg(
                 name='ctrl_address',
                 type=str,
                 default=None,
-                help='dlslime-ctrl address (host:port) for NanoDeploy node discovery',
+                help='dlslime-ctrl address (host:port) for DLEngine node discovery',
             ),
             CLIArg(
                 name='ctrl_scope',
@@ -362,8 +362,8 @@ class NanoDeployBackend(BackendHTTPTransportMixin, BaseBackend):
             CLIArg(
                 name='ctrl_kind',
                 type=str,
-                default='nanodeploy',
-                help='Entity kind to list from dlslime-ctrl (default: nanodeploy)',
+                default='dlengine',
+                help='Entity kind to list from dlslime-ctrl (default: dlengine)',
             ),
             CLIArg(
                 name='discovery_poll_interval',
@@ -374,17 +374,17 @@ class NanoDeployBackend(BackendHTTPTransportMixin, BaseBackend):
         ]
 
     @classmethod
-    def parse_config(cls, **kwargs: Any) -> NanoDeployConfig:
-        """Parse NanoDeploy config from CLI args."""
+    def parse_config(cls, **kwargs: Any) -> DLEngineConfig:
+        """Parse DLEngine config from CLI args."""
         ctrl_address = kwargs.get('ctrl_address')
         if ctrl_address is not None:
             ctrl_address = str(ctrl_address).strip() or None
         ctrl_scope = kwargs.get('ctrl_scope')
         if ctrl_scope is not None:
             ctrl_scope = str(ctrl_scope).strip() or None
-        ctrl_kind = kwargs.get('ctrl_kind') or 'nanodeploy'
+        ctrl_kind = kwargs.get('ctrl_kind') or 'dlengine'
         interval = float(kwargs.get('discovery_poll_interval', 5.0))
-        return NanoDeployConfig(
+        return DLEngineConfig(
             ctrl_address=ctrl_address,
             ctrl_scope=ctrl_scope,
             ctrl_kind=str(ctrl_kind),
